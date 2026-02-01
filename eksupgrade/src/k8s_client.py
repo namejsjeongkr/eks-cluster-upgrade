@@ -12,21 +12,14 @@ import queue
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-try:
-    from functools import cache
-except ImportError:
-    from functools import lru_cache as cache
-
-try:
-    from kubernetes.client.models.v1beta1_eviction import V1beta1Eviction as V1Eviction
-except ImportError:
-    from kubernetes.client.models.v1_eviction import V1Eviction
+from functools import cache
 
 import boto3
 from botocore.signers import RequestSigner
 from kubernetes import client, watch
+from kubernetes.client import V1Eviction
 from kubernetes.client.rest import ApiException
 
 from eksupgrade.utils import echo_error, echo_info, get_logger
@@ -63,7 +56,7 @@ class StatsWorker(threading.Thread):
 
 def get_bearer_token(cluster_id: str, region: str) -> str:
     """Authenticate the session with sts token."""
-    sts_token_expiration_ttl: int = 60
+    sts_token_expiration_ttl: int = 900
     session = boto3.session.Session()
 
     sts_client = session.client("sts", region_name=region)
@@ -94,7 +87,7 @@ def loading_config(cluster_name: str, region: str) -> str:
     resp = eks.describe_cluster(name=cluster_name)
     configs = client.Configuration()
     configs.host = resp["cluster"]["endpoint"]
-    configs.verify_ssl = False
+    configs.verify_ssl = True
     configs.debug = False
     configs.api_key = {"authorization": "Bearer " + get_bearer_token(cluster_name, region)}
     client.Configuration.set_default(configs)
@@ -138,7 +131,7 @@ def watcher(cluster_name: str, name: str, region: str) -> bool:
         raise e
 
 
-def drain_nodes(cluster_name, node_name, forced, region) -> Optional[str]:
+def drain_nodes(cluster_name, node_name, forced, region) -> str | None:
     """Pod eviction using the eviction API."""
     loading_config(cluster_name, region)
     core_v1_api = client.CoreV1Api()
@@ -164,13 +157,13 @@ def drain_nodes(cluster_name, node_name, forced, region) -> Optional[str]:
                     )
                     # retry to if pod is not deleted with eviction api
                     if not watcher(cluster_name, i.metadata.name, region) and retry < 2:
-                        drain_nodes(cluster_name, i.metadata.name, forced=forced, region=region)
+                        drain_nodes(cluster_name, node_name, forced=forced, region=region)
                         retry += 1
                     if retry == 2:
                         echo_error(
-                            f"Exception encountered - unable to delete the node: {i.metadata.name} in cluster: {cluster_name}",
+                            f"Exception encountered - unable to delete the pod: {i.metadata.name} from node: {node_name} in cluster: {cluster_name}",
                         )
-                        raise Exception("Error Not able to delete the Node" + i.metadata.name)
+                        raise Exception(f"Error: Unable to delete pod {i.metadata.name} from node {node_name}")
                     return None
             except Exception as e:
                 echo_error(
@@ -197,7 +190,7 @@ def find_node(cluster_name: str, instance_id: str, operation: str, region: str) 
     """Find the node by instance id."""
     loading_config(cluster_name, region)
     core_v1_api = client.CoreV1Api()
-    nodes: List[List[str]] = []
+    nodes: list[list[str]] = []
     response = core_v1_api.list_node()
 
     if not response.items:
@@ -248,7 +241,7 @@ def sort_pods(
     region: str,
     original_name: str,
     pod_name: str,
-    old_pods_names: List[str],
+    old_pods_names: list[str],
     namespace: str,
     count: int = 90,
 ) -> str:
@@ -292,22 +285,22 @@ def sort_pods(
 
 
 @cache
-def get_addon_details(cluster_name: str, addon: str, region: str) -> Dict[str, Any]:
+def get_addon_details(cluster_name: str, addon: str, region: str) -> dict[str, Any]:
     """Get addon details which includes its current version."""
     eks_client = boto3.client("eks", region_name=region)
-    addon_details: Dict[str, Any] = eks_client.describe_addon(clusterName=cluster_name, addonName=addon).get(
+    addon_details: dict[str, Any] = eks_client.describe_addon(clusterName=cluster_name, addonName=addon).get(
         "addon", {}
     )
     return addon_details
 
 
 @cache
-def get_addon_update_kwargs(cluster_name: str, addon: str, region: str) -> Dict[str, Any]:
+def get_addon_update_kwargs(cluster_name: str, addon: str, region: str) -> dict[str, Any]:
     """Get kwargs for subsequent update to addon."""
-    addon_details: Dict[str, Any] = get_addon_details(cluster_name, addon, region)
-    kwargs: Dict[str, Any] = {}
-    iam_role_arn: Optional[str] = addon_details.get("serviceAccountRoleArn")
-    config_values: Optional[str] = addon_details.get("configurationValues")
+    addon_details: dict[str, Any] = get_addon_details(cluster_name, addon, region)
+    kwargs: dict[str, Any] = {}
+    iam_role_arn: str | None = addon_details.get("serviceAccountRoleArn")
+    config_values: str | None = addon_details.get("configurationValues")
 
     if iam_role_arn:
         kwargs["serviceAccountRoleArn"] = iam_role_arn
@@ -317,26 +310,26 @@ def get_addon_update_kwargs(cluster_name: str, addon: str, region: str) -> Dict[
 
 
 @cache
-def get_addon_versions(version: str, region: str) -> List[Dict[str, Any]]:
+def get_addon_versions(version: str, region: str) -> list[dict[str, Any]]:
     """Get addon versions for the associated Kubernetes `version`."""
     eks_client = boto3.client("eks", region_name=region)
-    addon_versions: List[Dict[str, Any]] = eks_client.describe_addon_versions(kubernetesVersion=version).get(
+    addon_versions: list[dict[str, Any]] = eks_client.describe_addon_versions(kubernetesVersion=version).get(
         "addons", []
     )
     return addon_versions
 
 
 @cache
-def get_versions_by_addon(addon: str, version: str, region: str) -> Dict[str, Any]:
+def get_versions_by_addon(addon: str, version: str, region: str) -> dict[str, Any]:
     """Get target addon versions."""
-    addon_versions: List[Dict[str, Any]] = get_addon_versions(version, region)
+    addon_versions: list[dict[str, Any]] = get_addon_versions(version, region)
     return next(item for item in addon_versions if item["addonName"] == addon)
 
 
 @cache
 def get_default_version(addon: str, version: str, region: str) -> str:
     """Get the EKS default version of the `addon`."""
-    addon_dict: Dict[str, Any] = get_versions_by_addon(addon, version, region)
+    addon_dict: dict[str, Any] = get_versions_by_addon(addon, version, region)
     return next(
         item["addonVersion"]
         for item in addon_dict["addonVersions"]
@@ -344,7 +337,7 @@ def get_default_version(addon: str, version: str, region: str) -> str:
     )
 
 
-def is_cluster_auto_scaler_present(cluster_name: str, region: str) -> List[Union[bool, int]]:
+def is_cluster_auto_scaler_present(cluster_name: str, region: str) -> list[bool | int]:
     """Determine whether or not cluster autoscaler is present."""
     loading_config(cluster_name, region)
     apps_v1_api = client.AppsV1Api()

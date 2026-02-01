@@ -9,7 +9,7 @@ import time
 from abc import ABC
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import boto3
 from kubernetes import client as k8s_client
@@ -113,37 +113,37 @@ class AutoscalingGroup(AwsRegionResource):
     cluster: Cluster = field(default_factory=lambda: Cluster(arn="", version="1.24"))
     name: str = ""
     launch_configuration_name: str = ""
-    launch_template: Dict[str, str] = field(default_factory=dict)
-    mixed_instances_policy: Dict[str, Any] = field(default_factory=dict)
+    launch_template: dict[str, str] = field(default_factory=dict)
+    mixed_instances_policy: dict[str, Any] = field(default_factory=dict)
     min_size: int = 0
     max_size: int = 0
     desired_capacity: int = 0
     predicted_capacity: int = 0
     default_cooldown: int = 0
-    availability_zones: List[str] = field(default_factory=list)
-    load_balancer_names: List[str] = field(default_factory=list)
-    target_group_arns: List[str] = field(default_factory=list)
+    availability_zones: list[str] = field(default_factory=list)
+    load_balancer_names: list[str] = field(default_factory=list)
+    target_group_arns: list[str] = field(default_factory=list)
     health_check_type: str = ""
     health_check_grace_period: int = 0
-    instances: List[Dict[str, Any]] = field(default_factory=list)
+    instances: list[dict[str, Any]] = field(default_factory=list)
     placement_group: str = ""
     created_time: datetime.datetime = datetime.datetime.now()
-    suspended_processes: List[Dict[str, str]] = field(default_factory=list)
+    suspended_processes: list[dict[str, str]] = field(default_factory=list)
     vpc_zone_identifier: str = ""
     status: str = ""
-    termination_policies: List[str] = field(default_factory=list)
+    termination_policies: list[str] = field(default_factory=list)
     new_instances_protected_from_scale_in: bool = False
     service_linked_role_arn: str = ""
     max_instance_lifetime: int = 0
     capacity_rebalance: bool = False
-    warm_pool_configuration: Dict[str, Any] = field(default_factory=dict)
+    warm_pool_configuration: dict[str, Any] = field(default_factory=dict)
     warm_pool_size: int = 0
     context: str = ""
     desired_capacity_type: str = ""
     default_instance_warmup: int = 0
-    traffic_sources: List[Dict[str, str]] = field(default_factory=list)
-    enabled_metrics: List[Dict[str, str]] = field(default_factory=list)
-    asg_tags: List[Dict[str, str]] = field(default_factory=list)
+    traffic_sources: list[dict[str, str]] = field(default_factory=list)
+    enabled_metrics: list[dict[str, str]] = field(default_factory=list)
+    asg_tags: list[dict[str, str]] = field(default_factory=list)
 
     def __repr__(self) -> str:  # pragma: no cover
         """Return the string representation of a EKS Managed Node Group."""
@@ -238,16 +238,16 @@ class ManagedNodeGroup(EksResource):
     """Define the EKS Manage Node Group model."""
 
     cluster: Cluster = field(default_factory=lambda: Cluster(arn="", version="1.24"))
-    remote_access: Dict[str, Any] = field(default_factory=dict)
-    health: Dict[str, List[Any]] = field(default_factory=lambda: ({"issues": []}))
-    labels: Dict[str, str] = field(default_factory=dict)
-    update_config: Dict[str, int] = field(default_factory=dict)
-    launch_template: Dict[str, Any] = field(default_factory=dict)
-    scaling_config: Dict[str, int] = field(default_factory=dict)
-    instance_types: List[str] = field(default_factory=list)
-    subnets: List[str] = field(default_factory=list)
-    autoscaling_groups: List[Dict[str, str]] = field(default_factory=list)
-    taints: List[Dict[str, str]] = field(default_factory=list)
+    remote_access: dict[str, Any] = field(default_factory=dict)
+    health: dict[str, list[Any]] = field(default_factory=lambda: {"issues": []})
+    labels: dict[str, str] = field(default_factory=dict)
+    update_config: dict[str, int] = field(default_factory=dict)
+    launch_template: dict[str, Any] = field(default_factory=dict)
+    scaling_config: dict[str, int] = field(default_factory=dict)
+    instance_types: list[str] = field(default_factory=list)
+    subnets: list[str] = field(default_factory=list)
+    autoscaling_groups: list[dict[str, str]] = field(default_factory=list)
+    taints: list[dict[str, str]] = field(default_factory=list)
     created_at: datetime.datetime = datetime.datetime.now()
     modified_at: datetime.datetime = datetime.datetime.now()
     release_version: str = ""
@@ -274,7 +274,7 @@ class ManagedNodeGroup(EksResource):
         return self.name
 
     @cached_property
-    def autoscaling_group_names(self) -> List[str]:
+    def autoscaling_group_names(self) -> list[str]:
         """Return the list of autoscaling group names."""
         return [asg["name"] for asg in self.autoscaling_groups]
 
@@ -339,11 +339,11 @@ class ManagedNodeGroup(EksResource):
         release_version: str = "",
         force: bool = False,
         client_request_id: str = "",
-        launch_template: Optional[Dict[str, Any]] = None,
+        launch_template: dict[str, Any] | None = None,
         wait: bool = True,
     ) -> UpdateTypeDef:
         """Update the nodegroup to the target version."""
-        update_kwargs: Dict[str, Any] = {}
+        update_kwargs: dict[str, Any] = {}
 
         if not launch_template:
             update_kwargs["version"] = version or self.cluster.target_version
@@ -392,7 +392,7 @@ class ManagedNodeGroup(EksResource):
 class ClusterAddon(EksResource):
     """Define the Kubernetes Cluster Addon model."""
 
-    health: Dict[str, List[Any]] = field(default_factory=lambda: ({"issues": []}))
+    health: dict[str, list[Any]] = field(default_factory=lambda: {"issues": []})
     created_at: datetime.datetime = datetime.datetime.now()
     modified_at: datetime.datetime = datetime.datetime.now()
     service_account_role_arn: str = ""
@@ -706,7 +706,7 @@ class Cluster(EksResource):
         )
 
     @cached_property
-    def current_addons(self) -> List[str]:
+    def current_addons(self) -> list[str]:
         """Return a list of addon names currently installed in the cluster."""
         echo_info(f"Getting the list of current cluster addons for cluster: {self.name}...")
         return self.eks_client.list_addons(clusterName=self.name).get("addons", [])
@@ -727,7 +727,7 @@ class Cluster(EksResource):
         return self.resource_id or self.name
 
     @cached_property
-    def addons(self) -> List[ClusterAddon]:
+    def addons(self) -> list[ClusterAddon]:
         """Get the list of current cluster addons.
 
         Returns:
@@ -743,12 +743,12 @@ class Cluster(EksResource):
         return self._version_object < self._target_version_object
 
     @cached_property
-    def upgradable_addons(self) -> List[ClusterAddon]:
+    def upgradable_addons(self) -> list[ClusterAddon]:
         """Get a list of addons that require upgrade."""
         return [addon for addon in self.addons if addon.needs_upgrade]
 
     @cached_property
-    def upgradable_managed_nodegroups(self) -> List[ManagedNodeGroup]:
+    def upgradable_managed_nodegroups(self) -> list[ManagedNodeGroup]:
         """Get a list of managed nodegroups that require upgrade."""
         return [nodegroup for nodegroup in self.nodegroups if nodegroup.needs_upgrade]
 
@@ -762,7 +762,7 @@ class Cluster(EksResource):
         """Return the Cluster.target_version as a Version object."""
         return Version(self.target_version)
 
-    def update_cluster(self, wait: bool = True) -> Optional[UpdateTypeDef]:
+    def update_cluster(self, wait: bool = True) -> UpdateTypeDef | None:
         """Upgrade the cluster itself."""
         if self._version_object > self._target_version_object:
             echo_warning(
@@ -796,18 +796,18 @@ class Cluster(EksResource):
             self.wait_for_active()
         return update_response_body
 
-    def upgrade_addons(self, wait: bool = False) -> Dict[str, Any]:
+    def upgrade_addons(self, wait: bool = False) -> dict[str, Any]:
         """Upgrade all cluster addons."""
         echo_info("The add-ons update has been initiated...")
-        upgrade_details: Dict[str, Any] = {}
+        upgrade_details: dict[str, Any] = {}
         for addon in self.upgradable_addons:
             _update_responses: list[UpdateTypeDef] = addon.update(wait=wait)
             upgrade_details[addon.name] = _update_responses
         return upgrade_details
 
-    def upgrade_nodegroups(self, wait: bool = False) -> Dict[str, Any]:
+    def upgrade_nodegroups(self, wait: bool = False) -> dict[str, Any]:
         """Upgrade all EKS managed nodegroups."""
-        upgrade_details: Dict[str, Any] = {}
+        upgrade_details: dict[str, Any] = {}
         for nodegroup in self.upgradable_managed_nodegroups:
             _update_response: UpdateTypeDef = nodegroup.update(wait=wait)
             _update_id: str = _update_response.get("id", "")
@@ -830,7 +830,7 @@ class Cluster(EksResource):
         return token
 
     @property
-    def user_config(self) -> Dict[str, Union[str, List[Dict[str, Any]]]]:
+    def user_config(self) -> dict[str, str | list[dict[str, Any]]]:
         """Get a configuration for the Kubernetes client library.
 
         The credentials of the given portal user are used, access is restricted to the default namespace.
@@ -839,7 +839,7 @@ class Cluster(EksResource):
             The dictionary representation of Kubernetes configuration for the current cluster.
 
         """
-        config_data: Dict[str, Union[str, List[Dict[str, Any]]]] = {
+        config_data: dict[str, str | list[dict[str, Any]]] = {
             "current-context": self.cluster_name,
             "contexts": [
                 {
@@ -870,7 +870,7 @@ class Cluster(EksResource):
         }
         return config_data
 
-    def load_config(self, user_config: Optional[Dict[str, Any]] = None) -> None:
+    def load_config(self, user_config: dict[str, Any] | None = None) -> None:
         """Load the Kubernetes configuration.
 
         Arguments:
@@ -902,7 +902,7 @@ class Cluster(EksResource):
         return self.status == "UPDATING"
 
     @cached_property
-    def autoscaling_groups(self) -> List[AutoscalingGroup]:
+    def autoscaling_groups(self) -> list[AutoscalingGroup]:
         """Get the list of AutoScaling Groups (ASGs).
 
         We get a list of ASGs which will match the format
@@ -917,12 +917,12 @@ class Cluster(EksResource):
         return [AutoscalingGroup.get(asg_data=asg, region=self.region, cluster=self) for asg in response]
 
     @cached_property
-    def asg_names(self) -> List[str]:
+    def asg_names(self) -> list[str]:
         """Get the autoscaling group names."""
         return [asg.name for asg in self.autoscaling_groups]
 
     @cached_property
-    def available_addon_versions(self) -> List[AddonInfoTypeDef]:
+    def available_addon_versions(self) -> list[AddonInfoTypeDef]:
         """Get the available addon versions for the associated Kubernetes version."""
         addon_versions: List[AddonInfoTypeDef] = self.eks_client.describe_addon_versions(
             kubernetesVersion=self.target_version
@@ -930,13 +930,13 @@ class Cluster(EksResource):
         return addon_versions
 
     @cached_property
-    def nodegroup_names(self) -> List[str]:
+    def nodegroup_names(self) -> list[str]:
         """Get the cluster's associated nodegroups."""
         response: ListNodegroupsResponseTypeDef = self.eks_client.list_nodegroups(clusterName=self.name, maxResults=100)
         return response["nodegroups"]
 
     @cached_property
-    def nodegroups(self) -> List[ManagedNodeGroup]:
+    def nodegroups(self) -> list[ManagedNodeGroup]:
         """Get the cluster's associated nodegroups."""
         return [
             ManagedNodeGroup.get(node_group=nodegroup, cluster=self, region=self.region)

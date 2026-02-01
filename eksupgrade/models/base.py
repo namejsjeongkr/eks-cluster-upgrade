@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal
 
 import boto3
 
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 class BaseResource(ABC):
     """Define the base resource for the EKS cluster upgrade tool."""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the dictionary representation of this object."""
         return self.__dict__
 
@@ -37,7 +37,7 @@ class BaseResource(ABC):
         """Clear all cached properties."""
         cls = type(self)
 
-        def get_cached_properties(instance_type) -> List[str]:
+        def get_cached_properties(instance_type) -> list[str]:
             """Get the list of properties matching the instance type."""
             return [
                 attribute
@@ -46,7 +46,7 @@ class BaseResource(ABC):
                 if isinstance(instance, instance_type)
             ]
 
-        _cached_properties: List[str] = get_cached_properties(cached_property)
+        _cached_properties: list[str] = get_cached_properties(cached_property)
 
         for _cached_property in _cached_properties:
             echo_info(f"{self.__class__.__name__}: Clearing cached property: {_cached_property}")
@@ -60,8 +60,8 @@ class AwsResource(BaseResource, ABC):
 
     arn: str
     resource_id: str = ""
-    tags: Dict[str, Union[str, bool]] = field(default_factory=lambda: ({}))
-    errors: List[Dict[str, Any]] = field(default_factory=lambda: ([]))
+    tags: dict[str, str | bool] = field(default_factory=dict)
+    errors: list[dict[str, Any]] = field(default_factory=list)
 
     def _get_boto_client(
         self, service: Literal["autoscaling", "ec2", "eks", "sts"], **kwargs
@@ -72,8 +72,8 @@ class AwsResource(BaseResource, ABC):
     @cached_property
     def sts_client(self) -> STSClient:
         """Get a boto STS client."""
-        boto_kwargs: Dict[str, Any] = {}
-        region: Optional[str] = getattr(self, "region", "")
+        boto_kwargs: dict[str, Any] = {}
+        region: str | None = getattr(self, "region", "")
 
         if region:
             boto_kwargs["region_name"] = region

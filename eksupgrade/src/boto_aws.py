@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any
 
 import boto3
 
@@ -14,7 +14,7 @@ from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, 
 logger = get_logger(__name__)
 
 
-def status_of_cluster(cluster_name: str, region: str) -> List[str]:
+def status_of_cluster(cluster_name: str, region: str) -> list[str]:
     """Check the satus of the cluster and version of the cluster."""
     eks_client = boto3.client("eks", region_name=region)
     try:
@@ -44,7 +44,7 @@ def get_latest_instance(asg_name: str, add_time: datetime.datetime, region: str)
     """
     asg_client = boto3.client("autoscaling", region_name=region)
     ec2_client = boto3.client("ec2", region_name=region)
-    instances = []
+    instances: list[dict[str, Any]] = []
 
     response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
     time.sleep(20)
@@ -55,14 +55,14 @@ def get_latest_instance(asg_name: str, add_time: datetime.datetime, region: str)
         for instance in reservation["Instances"]:
             instances.append(instance)
 
-    instances_valid = []
+    instances_valid: list[dict[str, Any]] = []
     instances_valid = [
         instance
         for instance in instances
         if instance["State"]["Name"] in ["pending", "running"] and instance["LaunchTime"] > add_time
     ]
 
-    latest_instance: Dict[str, Any] = {}
+    latest_instance: dict[str, Any] = {}
     try:
         time.sleep(10)
         latest_instance = sorted(instances_valid, key=lambda instance: instance["LaunchTime"])[-1]
@@ -180,11 +180,11 @@ def add_node(asg_name: str, region: str) -> None:
         raise e
 
 
-def get_num_of_instances(asg_name: str, exclude_ids: List[str], region: str) -> int:
+def get_num_of_instances(asg_name: str, exclude_ids: list[str], region: str) -> int:
     """Count the number of instances."""
     asg_client = boto3.client("autoscaling", region_name=region)
     ec2_client = boto3.client("ec2", region_name=region)
-    instances = []
+    instances: list[dict[str, Any]] = []
 
     response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
     instance_ids = [
@@ -202,20 +202,20 @@ def get_num_of_instances(asg_name: str, exclude_ids: List[str], region: str) -> 
     return len(instances)
 
 
-def old_lt_scenarios(inst: Dict[str, Any], asg_lt_name: str, asg_lt_version: int) -> bool:
+def old_lt_scenarios(inst: dict[str, Any], asg_lt_name: str, asg_lt_version: int) -> bool:
     """Get the old launch template based on launch template name and version 1!=2."""
     lt_name = inst["LaunchTemplate"]["LaunchTemplateName"]
     lt_version = int(inst["LaunchTemplate"]["Version"])
     return (lt_name != asg_lt_name) or (lt_version != int(asg_lt_version))
 
 
-def get_old_lt(asg_name: str, region: str) -> List[str]:
+def get_old_lt(asg_name: str, region: str) -> list[str]:
     """Get the old launch template."""
     asg_client = boto3.client("autoscaling", region_name=region)
     ec2_client = boto3.client("ec2", region_name=region)
 
-    old_lt_instance_ids = []
-    instances = []
+    old_lt_instance_ids: list[str] = []
+    instances: list[dict[str, Any]] = []
 
     response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
     asg_lt_name = ""
@@ -249,10 +249,10 @@ def get_old_lt(asg_name: str, region: str) -> List[str]:
     return instances
 
 
-def old_launch_config_instances(asg_name: str, region: str) -> List[str]:
+def old_launch_config_instances(asg_name: str, region: str) -> list[str]:
     """Get the old launch configuration instance IDs."""
     asg_client = boto3.client("autoscaling", region_name=region)
-    old_lc_ids = []
+    old_lc_ids: list[str] = []
     # describing the asg group
     response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
     instances = response["AutoScalingGroups"][0]["Instances"]
@@ -263,7 +263,7 @@ def old_launch_config_instances(asg_name: str, region: str) -> List[str]:
     return old_lc_ids
 
 
-def outdated_lt(asgs, region: str) -> List[str]:
+def outdated_lt(asgs, region: str) -> list[str]:
     """Get the outdated launch template."""
     asg_client = boto3.client("autoscaling", region_name=region)
     asg = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asgs])
@@ -277,7 +277,7 @@ def outdated_lt(asgs, region: str) -> List[str]:
         launch_type = "LaunchTemplate"
     else:
         return []
-    old_instances = []
+    old_instances: list[str] = []
 
     if launch_type == "LaunchConfiguration":
         temp = old_launch_config_instances(asg_name, region)
@@ -296,7 +296,7 @@ def outdated_lt(asgs, region: str) -> List[str]:
     return []
 
 
-def add_autoscaling(asg_name: str, img_id: str, region: str) -> Dict[str, Any]:
+def add_autoscaling(asg_name: str, img_id: str, region: str) -> dict[str, Any]:
     """Add the new Launch Configuration to the ASG."""
     asg_client = boto3.client("autoscaling", region_name=region)
     timestamp = time.time()
@@ -328,7 +328,7 @@ def get_outdated_asg(asg_name: str, latest_img: str, region: str) -> bool:
     ec2_client = boto3.client("ec2", region_name=region)
     response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
     instance_ids = [instance["InstanceId"] for instance in response["AutoScalingGroups"][0]["Instances"]]
-    old_ami_inst = []
+    old_ami_inst: list[str] = []
     # filtering old instance where the logic is used to check whether we should add new launch configuration or not
     inst_response = ec2_client.describe_instances(InstanceIds=instance_ids)
     for reservation in inst_response["Reservations"]:
