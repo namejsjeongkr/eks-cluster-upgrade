@@ -365,3 +365,144 @@ def cluster_auto_enable_disable(cluster_name: str, operation: str, mx_val: int, 
     except Exception as e:
         echo_error(f"Exception encountered while running auto enable disable - Error: {e}")
         raise e
+
+
+def is_karpenter_present(cluster_name: str, region: str) -> tuple[bool, int, str]:
+    """Determine whether or not Karpenter is present.
+
+    Karpenter can be deployed in either 'karpenter' or 'kube-system' namespace.
+    Returns (is_present, replicas_count, namespace) similar to cluster autoscaler.
+    """
+    loading_config(cluster_name, region)
+    apps_v1_api = client.AppsV1Api()
+
+    # Check common namespaces for Karpenter deployment
+    namespaces_to_check = ["karpenter", "kube-system"]
+
+    for namespace in namespaces_to_check:
+        try:
+            res = apps_v1_api.list_namespaced_deployment(namespace=namespace)
+            for res_i in res.items:
+                if res_i.metadata.name == "karpenter":
+                    echo_info(f"Found Karpenter in namespace: {namespace}")
+                    return (True, res_i.spec.replicas, namespace)
+        except ApiException as e:
+            # Namespace might not exist, continue checking
+            if e.status == 404:
+                continue
+            echo_error(f"Error checking namespace {namespace}: {e}")
+
+    return (False, 0, "")
+
+
+def karpenter_enable_disable(cluster_name: str, operation: str, mx_val: int, region: str, namespace: str = "karpenter") -> None:
+    """Enable or disable Karpenter deployment in cluster.
+
+    Args:
+        cluster_name: The name of the EKS cluster
+        operation: Either 'pause' or 'start'
+        mx_val: The number of replicas to restore when starting
+        region: AWS region
+        namespace: Namespace where Karpenter is deployed (default: 'karpenter')
+    """
+    loading_config(cluster_name, region)
+    api = client.AppsV1Api()
+
+    if operation == "pause":
+        body = {"spec": {"replicas": 0}}
+    elif operation == "start":
+        body = {"spec": {"replicas": mx_val}}
+    else:
+        echo_error("Operation must be either pause or start for Karpenter!")
+        raise NotImplementedError("Operation must be either pause or start!")
+
+    try:
+        api.patch_namespaced_deployment(name="karpenter", namespace=namespace, body=body)
+        echo_info(f"Karpenter {'paused' if operation == 'pause' else 'enabled'} in namespace: {namespace}")
+    except Exception as e:
+        echo_error(f"Exception encountered while controlling Karpenter - Error: {e}")
+        raise e
+
+
+def get_karpenter_nodes(cluster_name: str, region: str) -> list[str]:
+    """Get list of nodes managed by Karpenter.
+
+    Karpenter nodes are identified by the following labels:
+    - v1.x (NodePool): karpenter.sh/nodepool
+    - v0.x (Provisioner): karpenter.sh/provisioner-name
+
+    Returns:
+        List of node names managed by Karpenter
+    """
+    loading_config(cluster_name, region)
+    core_v1_api = client.CoreV1Api()
+    karpenter_nodes: list[str] = []
+
+    try:
+        nodes = core_v1_api.list_node()
+
+        for node in nodes.items:
+            labels = node.metadata.labels
+            # Check for both v1.x (NodePool) and v0.x (Provisioner) labels
+            if "karpenter.sh/nodepool" in labels or "karpenter.sh/provisioner-name" in labels:
+                karpenter_nodes.append(node.metadata.name)
+                nodepool_or_provisioner = labels.get("karpenter.sh/nodepool") or labels.get("karpenter.sh/provisioner-name")
+                echo_info(f"Found Karpenter node: {node.metadata.name} (managed by: {nodepool_or_provisioner})")
+
+    except Exception as e:
+        echo_error(f"Exception encountered while getting Karpenter nodes - Error: {e}")
+        raise e
+
+    return karpenter_nodes
+
+
+def get_karpenter_nodepools(cluster_name: str, region: str) -> dict[str, list[str]]:
+    """Get list of Karpenter NodePools and Provisioners (legacy).
+
+    Returns a dictionary with:
+    - 'nodepools': List of NodePool names (v1.x)
+    - 'provisioners': List of Provisioner names (v0.x, deprecated)
+    """
+    loading_config(cluster_name, region)
+    custom_objects_api = client.CustomObjectsApi()
+
+    result: dict[str, list[str]] = {
+        "nodepools": [],
+        "provisioners": []
+    }
+
+    # Try to get NodePools (v1.x)
+    try:
+        nodepools = custom_objects_api.list_cluster_custom_object(
+            group="karpenter.sh",
+            version="v1",
+            plural="nodepools"
+        )
+        for item in nodepools.get("items", []):
+            nodepool_name = item["metadata"]["name"]
+            result["nodepools"].append(nodepool_name)
+            echo_info(f"Found NodePool: {nodepool_name}")
+    except ApiException as e:
+        if e.status == 404:
+            echo_info("No v1 NodePools found (this is normal for Karpenter v0.x)")
+        else:
+            echo_error(f"Error fetching NodePools: {e}")
+
+    # Try to get Provisioners (v0.x, legacy)
+    try:
+        provisioners = custom_objects_api.list_cluster_custom_object(
+            group="karpenter.sh",
+            version="v1alpha5",
+            plural="provisioners"
+        )
+        for item in provisioners.get("items", []):
+            provisioner_name = item["metadata"]["name"]
+            result["provisioners"].append(provisioner_name)
+            echo_info(f"Found Provisioner (legacy): {provisioner_name}")
+    except ApiException as e:
+        if e.status == 404:
+            echo_info("No v1alpha5 Provisioners found (this is normal for Karpenter v1.x)")
+        else:
+            echo_error(f"Error fetching Provisioners: {e}")
+
+    return result

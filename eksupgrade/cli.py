@@ -15,7 +15,12 @@ from eksupgrade.utils import confirm, echo_error, echo_info, echo_warning, get_l
 
 from .exceptions import ClusterInactiveException
 from .models.eks import Cluster
-from .src.k8s_client import cluster_auto_enable_disable, is_cluster_auto_scaler_present
+from .src.k8s_client import (
+    cluster_auto_enable_disable,
+    is_cluster_auto_scaler_present,
+    is_karpenter_present,
+    karpenter_enable_disable,
+)
 from .starter import StatsWorker, actual_update
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -66,6 +71,13 @@ def main(
             "Please use an EKS upgrade readiness assessment tool such as: github.com/clowdhaus/eksup"
         )
 
+    # Initialize autoscaler state variables before try block
+    is_ca_present: bool = False
+    ca_replicas_value: int = 0
+    is_karpenter: bool = False
+    karpenter_replicas: int = 0
+    karpenter_namespace: str = ""
+
     try:
         # Pull cluster details, populating the object for subsequent use throughout the upgrade.
         target_cluster: Cluster = Cluster.get(
@@ -112,16 +124,34 @@ def main(
         # addons update
         target_cluster.upgrade_addons(wait=True)
 
-        # checking auto scaler present and the value associated from it
-        is_present, replicas_value = is_cluster_auto_scaler_present(cluster_name=cluster_name, region=region)
+        # checking Cluster Autoscaler present and the value associated from it
+        is_ca_present, ca_replicas_value = is_cluster_auto_scaler_present(cluster_name=cluster_name, region=region)
 
-        if is_present:
+        # checking Karpenter present and the value associated from it
+        is_karpenter, karpenter_replicas, karpenter_namespace = is_karpenter_present(
+            cluster_name=cluster_name, region=region
+        )
+
+        # Pause autoscalers if present
+        if is_ca_present:
             cluster_auto_enable_disable(
-                cluster_name=cluster_name, operation="pause", mx_val=replicas_value, region=region
+                cluster_name=cluster_name, operation="pause", mx_val=ca_replicas_value, region=region
             )
             echo_info("Paused the Cluster AutoScaler")
         else:
             echo_info("No Cluster AutoScaler is Found")
+
+        if is_karpenter:
+            karpenter_enable_disable(
+                cluster_name=cluster_name,
+                operation="pause",
+                mx_val=karpenter_replicas,
+                region=region,
+                namespace=karpenter_namespace,
+            )
+            echo_info(f"Paused Karpenter in namespace: {karpenter_namespace}")
+        else:
+            echo_info("No Karpenter is Found")
 
         if parallel:
             for x in range(20):
@@ -152,25 +182,54 @@ def main(
         if parallel:
             queue.join()
 
-        if is_present:
+        # Re-enable autoscalers after upgrade
+        if is_ca_present:
             cluster_auto_enable_disable(
-                cluster_name=cluster_name, operation="start", mx_val=replicas_value, region=region
+                cluster_name=cluster_name, operation="start", mx_val=ca_replicas_value, region=region
             )
             echo_info("Cluster Autoscaler is Enabled Again")
+
+        if is_karpenter:
+            karpenter_enable_disable(
+                cluster_name=cluster_name,
+                operation="start",
+                mx_val=karpenter_replicas,
+                region=region,
+                namespace=karpenter_namespace,
+            )
+            echo_info(f"Karpenter is Enabled Again in namespace: {karpenter_namespace}")
+
         echo_info(f"EKS Cluster {cluster_name} UPDATED TO {cluster_version}")
     except typer.Abort:
         echo_warning("Cluster upgrade aborted!")
     except Exception as error:
-        if is_present:
+        # Try to re-enable autoscalers even on error
+        if is_ca_present:
             try:
                 cluster_auto_enable_disable(
-                    cluster_name=cluster_name, operation="start", mx_val=replicas_value, region=region
+                    cluster_name=cluster_name, operation="start", mx_val=ca_replicas_value, region=region
                 )
                 echo_info("Cluster Autoscaler is Enabled Again")
             except Exception as error2:
                 echo_error(
-                    f"Autoenable failed and must be done manually! Error: {error2}",
+                    f"Cluster Autoscaler re-enable failed and must be done manually! Error: {error2}",
                 )
+
+        if is_karpenter:
+            try:
+                karpenter_enable_disable(
+                    cluster_name=cluster_name,
+                    operation="start",
+                    mx_val=karpenter_replicas,
+                    region=region,
+                    namespace=karpenter_namespace,
+                )
+                echo_info(f"Karpenter is Enabled Again in namespace: {karpenter_namespace}")
+            except Exception as error2:
+                echo_error(
+                    f"Karpenter re-enable failed and must be done manually! Error: {error2}",
+                )
+
         echo_error(f"Exception encountered! Error: {error}")
 
 
