@@ -20,6 +20,7 @@ from .src.k8s_client import (
     is_cluster_auto_scaler_present,
     is_karpenter_present,
     karpenter_enable_disable,
+    upgrade_karpenter_nodes,
 )
 from .starter import StatsWorker, actual_update
 
@@ -181,6 +182,14 @@ def main(
 
         if parallel:
             queue.join()
+
+        # Upgrade Karpenter-managed nodes before re-enabling Karpenter.
+        # Nodes are drained and EC2 instances terminated so that Karpenter
+        # will provision fresh nodes (with the updated AMI) once re-enabled.
+        if is_karpenter:
+            echo_info("Upgrading Karpenter-managed nodes...")
+            upgrade_karpenter_nodes(cluster_name=cluster_name, region=region, forced=force)
+            echo_info("Karpenter node upgrade complete")
 
         # Re-enable autoscalers after upgrade
         if is_ca_present:

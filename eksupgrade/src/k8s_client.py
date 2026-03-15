@@ -456,6 +456,63 @@ def get_karpenter_nodes(cluster_name: str, region: str) -> list[str]:
     return karpenter_nodes
 
 
+def upgrade_karpenter_nodes(cluster_name: str, region: str, forced: bool = False) -> None:
+    """Upgrade Karpenter-managed nodes by draining and terminating them.
+
+    After the EKS control plane is upgraded, Karpenter-managed nodes need to be
+    drained and their underlying EC2 instances terminated so that when Karpenter
+    is re-enabled it provisions new nodes with the updated AMI.
+
+    Args:
+        cluster_name: The name of the EKS cluster
+        region: AWS region
+        forced: If True, force pod eviction ignoring PodDisruptionBudgets
+    """
+    karpenter_nodes = get_karpenter_nodes(cluster_name, region)
+
+    if not karpenter_nodes:
+        echo_info("No Karpenter nodes found to upgrade")
+        return
+
+    echo_info(f"Found {len(karpenter_nodes)} Karpenter node(s) to upgrade")
+
+    loading_config(cluster_name, region)
+    core_v1_api = client.CoreV1Api()
+    ec2_client = boto3.client("ec2", region_name=region)
+
+    for node_name in karpenter_nodes:
+        echo_info(f"Upgrading Karpenter node: {node_name}")
+
+        # Extract EC2 instance ID from node's provider ID (format: aws:///az/i-xxxxx)
+        try:
+            node = core_v1_api.read_node(node_name)
+            provider_id = node.spec.provider_id
+            instance_id = provider_id.split("/")[-1]
+            echo_info(f"Node {node_name} maps to EC2 instance: {instance_id}")
+        except Exception as e:
+            echo_error(f"Failed to get instance ID for node {node_name}: {e}")
+            raise e
+
+        # Cordon the node to prevent new pods from being scheduled
+        echo_info(f"Cordoning Karpenter node: {node_name}")
+        unschedule_old_nodes(cluster_name=cluster_name, node_name=node_name, region=region)
+
+        # Drain the node (evict all non-daemonset pods)
+        echo_info(f"Draining Karpenter node: {node_name}")
+        drain_nodes(cluster_name=cluster_name, node_name=node_name, forced=forced, region=region)
+
+        # Terminate the underlying EC2 instance.
+        # Karpenter's NodeClaim will detect the instance termination and clean up.
+        # When Karpenter is re-enabled, it will provision new nodes with the updated AMI.
+        echo_info(f"Terminating EC2 instance {instance_id} for Karpenter node: {node_name}")
+        try:
+            ec2_client.terminate_instances(InstanceIds=[instance_id])
+            echo_info(f"Successfully terminated EC2 instance: {instance_id}")
+        except Exception as e:
+            echo_error(f"Failed to terminate EC2 instance {instance_id} for node {node_name}: {e}")
+            raise e
+
+
 def get_karpenter_nodepools(cluster_name: str, region: str) -> dict[str, list[str]]:
     """Get list of Karpenter NodePools and Provisioners (legacy).
 

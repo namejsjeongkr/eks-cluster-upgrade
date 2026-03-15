@@ -17,13 +17,70 @@ The pre/post-flight checks are removed in favor of guiding the user to evaluate 
 
 ### Cluster Upgrade
 
-1. Control plane upgrade - This is handled entirely by AWS once the version upgrade has been requested.
-2. Identification of Managed and Self-managed node - The worker nodes are identified as EKS managed and Self-managed to perform upgrade.
-3. Managed Node group update - Updates managed node group to the specified version.
-4. Self-managed Node group update
-   - Launch new nodes with upgraded version and wait until they require ready status for next step.
-   - Mark existing nodes as unschedulable.
-   - If pod disruption budget (PDB) is present then check for force eviction flag (--force) which is given by user, only then evict the pods or continue with the flow.
+The upgrade process runs in the following order to ensure cluster stability at each step:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     EKS Cluster Upgrade Flow                    │
+└─────────────────────────────────────────────────────────────────┘
+
+  [1] Control Plane Upgrade
+      └─ AWS manages the upgrade; eksupgrade waits until ACTIVE
+
+  [2] Add-on Upgrades  (vpc-cni → kube-proxy → coredns)
+      └─ vpc-cni is upgraded step-by-step per minor version
+         to preserve network compatibility during the upgrade
+
+  [3] Cluster Autoscaler / Karpenter → PAUSE
+      └─ Prevents autoscalers from interfering with node replacement
+
+  [4] Managed Node Group Upgrade
+      └─ EKS performs a rolling AMI replacement on each node group
+         (can be parallelised with --parallel)
+
+  [5] Self-managed Node Group Upgrade  (ASG-based)
+      └─ For each Auto Scaling Group:
+           a. Detect current AMI type (AL2023 / AL2 / Bottlerocket /
+              Windows / Ubuntu)
+           b. Fetch the latest EKS-optimised AMI from SSM
+           c. Create a new Launch Configuration with the updated AMI
+           d. For each outdated instance:
+                i.  Launch a replacement node and wait for Ready
+               ii.  Cordon old node (block new scheduling)
+              iii.  Drain old node (evict pods, respects PDB unless
+                    --force is set)
+               iv.  Delete node object and terminate EC2 instance
+
+  [6] Karpenter Node Upgrade  (if Karpenter is detected)
+      └─ For each Karpenter-managed node:
+           a. Cordon node (block new scheduling)
+           b. Drain node (evict pods, respects PDB unless --force)
+           c. Terminate underlying EC2 instance
+              → Karpenter re-provisions with updated AMI on resume
+
+  [7] Cluster Autoscaler / Karpenter → RESUME
+      └─ Restored to original replica count
+         (always runs, even if an earlier step fails)
+```
+
+#### Supported Node Types
+
+| Node Type | Managed Node Group | Self-managed (ASG) | Karpenter |
+|-----------|:-----------------:|:------------------:|:---------:|
+| Amazon Linux 2023 (AL2023) | ✅ | ✅ | ✅ |
+| Amazon Linux 2 (AL2) | ✅ | ✅ | ✅ |
+| Bottlerocket | ✅ | ✅ | ✅ |
+| Windows Server | ✅ | ✅ | ✅ |
+| Ubuntu | ✅ | ✅ | ✅ |
+
+#### Supported Kubernetes Versions
+
+| EKS Version | Supported |
+|-------------|:---------:|
+| 1.27 – 1.35 | ✅ |
+| 1.21 – 1.26 | ✅ (legacy) |
+
+> **Note:** Only sequential single-minor-version upgrades are supported (e.g. 1.32 → 1.33). Jumping multiple minor versions in one run (e.g. 1.32 → 1.34) is not allowed by EKS.
 
 ## Pre-Requisites
 
@@ -62,6 +119,7 @@ python -m pip install eksupgrade
         "autoscaling:TerminateInstanceInAutoScalingGroup",
         "autoscaling:UpdateAutoScalingGroup",
         "ec2:Describe*",
+        "ec2:TerminateInstances",
         "ssm:*"
       ],
       "Resource": "*"

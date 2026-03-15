@@ -21,7 +21,10 @@ def image_type(node_type: str, image_id: str, region: str) -> Optional[str]:
         {"Name": "is-public", "Values": ["true"]},
     ]
 
-    if "amazon linux 2" in node_type:
+    # AL2023 must be checked BEFORE AL2 to avoid substring match ("amazon linux 2" is in "amazon linux 2023")
+    if "amazon linux 2023" in node_type:
+        filters.append({"Name": "name", "Values": ["amazon-eks-node-al2023-*"]})
+    elif "amazon linux 2" in node_type:
         filters.append({"Name": "name", "Values": ["amazon-eks-node*"]})
     elif "bottlerocket" in node_type:
         filters.append({"Name": "name", "Values": ["bottlerocket-aws-k8s-*"]})
@@ -58,7 +61,7 @@ def get_ami_name(cluster_name: str, asg_name: str, region: str):
     for reservation in response["Reservations"]:
         for instance in reservation["Instances"]:
             image_id = instance["ImageId"]
-            # getting the instance type as amz2 or windows or ubuntu
+            # getting the instance type as amz2023, amz2, windows, bottlerocket or ubuntu
             node_type = find_node(cluster_name, instance["InstanceId"], "os_type", region)
             _image_type = image_type(node_type=node_type, image_id=image_id, region=region)
             logger.debug("_image_type: %s", _image_type)
