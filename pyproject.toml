@@ -17,7 +17,6 @@ classifiers = [
 ]
 include = [
     "README.md",
-    "LICENSE",
 ]
 
 [tool.poetry.scripts]
