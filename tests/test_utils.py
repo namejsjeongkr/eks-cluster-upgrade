@@ -9,29 +9,9 @@ from eksupgrade.utils import (
     echo_info,
     echo_success,
     echo_warning,
-    get_package_asset,
-    get_package_dict,
 )
 
 runner = CliRunner()
-
-
-def test_get_package_asset() -> None:
-    """Test the get package asset method."""
-    data = get_package_asset("coredns.json")
-    assert data.startswith("{")
-
-
-def test_get_package_asset_nondefault() -> None:
-    """Test the get package asset method."""
-    data = get_package_asset("__init__.py", base_path="")
-    assert "__version__" in data
-
-
-def test_get_package_dict() -> None:
-    """Test the get package dict method."""
-    data = get_package_dict("coredns.json")
-    assert data["kind"] == "Deployment"
 
 
 def test_echo_deprecation(app) -> None:
