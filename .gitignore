@@ -84,3 +84,7 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Local Claude Code session state / per-user settings
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

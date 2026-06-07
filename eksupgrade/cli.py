@@ -15,13 +15,8 @@ from eksupgrade.utils import confirm, echo_error, echo_info, echo_warning, get_l
 
 from .exceptions import ClusterInactiveException
 from .models.eks import Cluster
-from .src.k8s_client import (
-    cluster_auto_enable_disable,
-    is_cluster_auto_scaler_present,
-    is_karpenter_present,
-    karpenter_enable_disable,
-    upgrade_karpenter_nodes,
-)
+from .src.k8s_client import cluster_auto_enable_disable, is_cluster_auto_scaler_present, is_karpenter_present
+from .src.karpenter import handle_karpenter_drift
 from .starter import StatsWorker, actual_update
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -60,8 +55,6 @@ def main(
 ) -> None:
     """Run eksupgrade against a target cluster."""
     queue = Queue()
-    is_present: bool = False
-    replicas_value: int = 0
 
     if disable_checks:
         echo_warning("--disable-checks is currently unused until the new validation workflows are implemented")
@@ -75,8 +68,9 @@ def main(
     # Initialize autoscaler state variables before try block
     is_ca_present: bool = False
     ca_replicas_value: int = 0
+    ca_name: str = "cluster-autoscaler"
+    ca_namespace: str = "kube-system"
     is_karpenter: bool = False
-    karpenter_replicas: int = 0
     karpenter_namespace: str = ""
 
     try:
@@ -126,31 +120,31 @@ def main(
         target_cluster.upgrade_addons(wait=True)
 
         # checking Cluster Autoscaler present and the value associated from it
-        is_ca_present, ca_replicas_value = is_cluster_auto_scaler_present(cluster_name=cluster_name, region=region)
-
-        # checking Karpenter present and the value associated from it
-        is_karpenter, karpenter_replicas, karpenter_namespace = is_karpenter_present(
+        is_ca_present, ca_replicas_value, ca_name, ca_namespace = is_cluster_auto_scaler_present(
             cluster_name=cluster_name, region=region
         )
 
-        # Pause autoscalers if present
+        # Pause Cluster Autoscaler if present (scale its deployment to 0)
         if is_ca_present:
             cluster_auto_enable_disable(
-                cluster_name=cluster_name, operation="pause", mx_val=ca_replicas_value, region=region
+                cluster_name=cluster_name,
+                operation="pause",
+                mx_val=ca_replicas_value,
+                region=region,
+                name=ca_name,
+                namespace=ca_namespace,
             )
-            echo_info("Paused the Cluster AutoScaler")
+            echo_info(f"Paused the Cluster AutoScaler ({ca_name} in {ca_namespace})")
         else:
             echo_info("No Cluster AutoScaler is Found")
 
+        # checking Karpenter present — the controller is left RUNNING so its
+        # native Drift can replace nodes capacity-first after the control plane upgrade.
+        is_karpenter, _karpenter_replicas, karpenter_namespace = is_karpenter_present(
+            cluster_name=cluster_name, region=region
+        )
         if is_karpenter:
-            karpenter_enable_disable(
-                cluster_name=cluster_name,
-                operation="pause",
-                mx_val=karpenter_replicas,
-                region=region,
-                namespace=karpenter_namespace,
-            )
-            echo_info(f"Paused Karpenter in namespace: {karpenter_namespace}")
+            echo_info(f"Karpenter detected in namespace: {karpenter_namespace} (left running for drift)")
         else:
             echo_info("No Karpenter is Found")
 
@@ -183,30 +177,37 @@ def main(
         if parallel:
             queue.join()
 
-        # Upgrade Karpenter-managed nodes before re-enabling Karpenter.
-        # Nodes are drained and EC2 instances terminated so that Karpenter
-        # will provision fresh nodes (with the updated AMI) once re-enabled.
+        # Upgrade Karpenter-managed nodes via native Drift. The control plane is
+        # already upgraded, so alias-based EC2NodeClasses re-resolve to the new
+        # Kubernetes version's AMI; Karpenter replaces drifted NodeClaims
+        # capacity-first while honoring PDBs and disruption budgets. We only
+        # observe (and warn about pinned NodeClasses that won't auto-drift).
         if is_karpenter:
-            echo_info("Upgrading Karpenter-managed nodes...")
-            upgrade_karpenter_nodes(cluster_name=cluster_name, region=region, forced=force)
-            echo_info("Karpenter node upgrade complete")
+            echo_info("Handling Karpenter node upgrade via drift...")
+            drift_result = handle_karpenter_drift(
+                cluster_name=cluster_name, region=region, target_version=cluster_version
+            )
+            if drift_result == "settled":
+                echo_info("Karpenter drift complete — nodes are on the new version")
+            elif drift_result == "timeout":
+                echo_warning("Karpenter drift did not complete within the timeout; check NodeClaims")
+            else:  # no_drift
+                echo_warning(
+                    "No Karpenter nodes auto-drifted (no alias-based EC2NodeClass). "
+                    "Pinned NodeClasses need manual amiSelectorTerms updates."
+                )
 
-        # Re-enable autoscalers after upgrade
+        # Re-enable Cluster Autoscaler after upgrade
         if is_ca_present:
             cluster_auto_enable_disable(
-                cluster_name=cluster_name, operation="start", mx_val=ca_replicas_value, region=region
-            )
-            echo_info("Cluster Autoscaler is Enabled Again")
-
-        if is_karpenter:
-            karpenter_enable_disable(
                 cluster_name=cluster_name,
                 operation="start",
-                mx_val=karpenter_replicas,
+                mx_val=ca_replicas_value,
                 region=region,
-                namespace=karpenter_namespace,
+                name=ca_name,
+                namespace=ca_namespace,
             )
-            echo_info(f"Karpenter is Enabled Again in namespace: {karpenter_namespace}")
+            echo_info("Cluster Autoscaler is Enabled Again")
 
         echo_info(f"EKS Cluster {cluster_name} UPDATED TO {cluster_version}")
     except typer.Abort:
@@ -216,7 +217,12 @@ def main(
         if is_ca_present:
             try:
                 cluster_auto_enable_disable(
-                    cluster_name=cluster_name, operation="start", mx_val=ca_replicas_value, region=region
+                    cluster_name=cluster_name,
+                    operation="start",
+                    mx_val=ca_replicas_value,
+                    region=region,
+                    name=ca_name,
+                    namespace=ca_namespace,
                 )
                 echo_info("Cluster Autoscaler is Enabled Again")
             except Exception as error2:
@@ -224,21 +230,8 @@ def main(
                     f"Cluster Autoscaler re-enable failed and must be done manually! Error: {error2}",
                 )
 
-        if is_karpenter:
-            try:
-                karpenter_enable_disable(
-                    cluster_name=cluster_name,
-                    operation="start",
-                    mx_val=karpenter_replicas,
-                    region=region,
-                    namespace=karpenter_namespace,
-                )
-                echo_info(f"Karpenter is Enabled Again in namespace: {karpenter_namespace}")
-            except Exception as error2:
-                echo_error(
-                    f"Karpenter re-enable failed and must be done manually! Error: {error2}",
-                )
-
+        # Karpenter is never paused (drift needs the controller running), so there
+        # is nothing to re-enable here on error.
         echo_error(f"Exception encountered! Error: {error}")
 
 

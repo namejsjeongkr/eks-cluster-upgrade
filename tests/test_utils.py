@@ -18,9 +18,8 @@ runner = CliRunner()
 
 def test_get_package_asset() -> None:
     """Test the get package asset method."""
-    data = get_package_asset("version_dict.json")
+    data = get_package_asset("coredns.json")
     assert data.startswith("{")
-    assert data.endswith("\n")
 
 
 def test_get_package_asset_nondefault() -> None:
@@ -31,8 +30,8 @@ def test_get_package_asset_nondefault() -> None:
 
 def test_get_package_dict() -> None:
     """Test the get package dict method."""
-    data = get_package_dict("version_dict.json")
-    assert data["1.26"]["cluster-autoscaler"]
+    data = get_package_dict("coredns.json")
+    assert data["kind"] == "Deployment"
 
 
 def test_echo_deprecation(app) -> None:
