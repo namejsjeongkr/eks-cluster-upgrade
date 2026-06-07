@@ -22,7 +22,7 @@ from kubernetes import client, watch
 from kubernetes.client import V1Eviction
 from kubernetes.client.rest import ApiException
 
-from eksupgrade.utils import echo_error, echo_info, get_logger
+from eksupgrade.utils import echo_error, echo_info, echo_warning, get_logger
 
 logger = get_logger(__name__)
 
@@ -204,6 +204,81 @@ def drain_nodes(cluster_name, node_name, forced, region) -> str | None:
             )
             raise Exception("Unable to Delete the Node")
     return None
+
+
+def _is_statefulset_pod(pod) -> bool:
+    """Return True if the pod is owned by a StatefulSet."""
+    return any(ref.kind == "StatefulSet" for ref in (pod.metadata.owner_references or []))
+
+
+def get_statefulset_pods_on_node(cluster_name: str, node_name: str, region: str) -> list[tuple[str, str]]:
+    """Return (name, namespace) of StatefulSet pods on the node.
+
+    Must be called BEFORE draining the node — draining removes the pods, after
+    which they can no longer be identified. The returned identities are used to
+    confirm the pods come back Ready (and thus rebind their PVCs) elsewhere.
+    """
+    loading_config(cluster_name, region)
+    core_v1_api = client.CoreV1Api()
+    api_response = core_v1_api.list_pod_for_all_namespaces(watch=False, field_selector=f"spec.nodeName={node_name}")
+    return [
+        (pod.metadata.name, pod.metadata.namespace)
+        for pod in api_response.items
+        if pod.spec.node_name == node_name and _is_statefulset_pod(pod)
+    ]
+
+
+def _pod_running_and_ready(pod) -> bool:
+    """Return True if the pod is Running and has a Ready=True condition."""
+    if pod.status.phase != "Running":
+        return False
+    return any(c.type == "Ready" and c.status == "True" for c in (pod.status.conditions or []))
+
+
+def wait_for_statefulset_pods_ready(
+    cluster_name: str,
+    region: str,
+    pods: list[tuple[str, str]],
+    timeout: int = 600,
+    poll_interval: int = 15,
+) -> bool:
+    """Wait, with a bound, for the given StatefulSet pods to be Running and Ready.
+
+    A StatefulSet pod cannot reach Ready until its volume mounts, so pod-Ready is
+    the PVC-rebind confirmation. Returns immediately if there are no pods. Never
+    forces anything — on timeout it reports and returns False.
+    """
+    if not pods:
+        return True
+
+    loading_config(cluster_name, region)
+    core_v1_api = client.CoreV1Api()
+    deadline = time.monotonic() + timeout
+
+    while True:
+        not_ready: list[str] = []
+        for name, namespace in pods:
+            try:
+                pod = core_v1_api.read_namespaced_pod(name=name, namespace=namespace)
+                if not _pod_running_and_ready(pod):
+                    not_ready.append(name)
+            except ApiException:
+                # Pod not recreated yet (e.g. 404 during reschedule).
+                not_ready.append(name)
+
+        if not not_ready:
+            echo_info("All StatefulSet pods are Running and Ready on their replacement nodes.")
+            return True
+
+        if time.monotonic() >= deadline:
+            echo_warning(
+                f"Timed out waiting for StatefulSet pods to become Ready: {not_ready}. "
+                f"Check their PVCs / scheduling before continuing.",
+            )
+            return False
+
+        echo_info(f"Waiting for StatefulSet pods to become Ready: {not_ready}")
+        time.sleep(poll_interval)
 
 
 def delete_node(cluster_name: str, node_name: str, region: str) -> None:

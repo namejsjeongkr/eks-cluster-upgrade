@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 
-from eksupgrade.utils import echo_error, echo_info, echo_success, get_logger
+from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
 
 from .src.boto_aws import (
     add_autoscaling,
@@ -20,7 +20,14 @@ from .src.boto_aws import (
     worker_terminate,
 )
 from .src.eks_get_image_type import get_ami_name
-from .src.k8s_client import delete_node, drain_nodes, find_node, unschedule_old_nodes
+from .src.k8s_client import (
+    delete_node,
+    drain_nodes,
+    find_node,
+    get_statefulset_pods_on_node,
+    unschedule_old_nodes,
+    wait_for_statefulset_pods_ready,
+)
 from .src.latest_ami import get_latest_ami
 from .src.self_managed import update_nodegroup
 
@@ -114,6 +121,12 @@ def actual_update(cluster_name, asg_iter, to_update, region, max_retry, forced):
                     echo_error("404 instance is not corresponded to particular node group")
                     raise Exception("404 instance is not corresponded to particular node group")
 
+            # Capture StatefulSet pods BEFORE draining — drain removes them from
+            # the node, after which they can no longer be identified.
+            statefulset_pods = get_statefulset_pods_on_node(
+                cluster_name=cluster_name, node_name=old_pod_id, region=region
+            )
+
             echo_info(f"Unscheduling the worker node = {old_pod_id}")
 
             unschedule_old_nodes(cluster_name=cluster_name, node_name=old_pod_id, region=region)
@@ -121,6 +134,17 @@ def actual_update(cluster_name, asg_iter, to_update, region, max_retry, forced):
             drain_nodes(cluster_name=cluster_name, node_name=old_pod_id, forced=forced, region=region)
             echo_info(f"The worker node has been drained! Deleting worker Node Started = {old_pod_id}")
             delete_node(cluster_name=cluster_name, node_name=old_pod_id, region=region)
+
+            # Wait for evicted StatefulSet pods to reschedule and re-bind their PVCs
+            # (pod-Ready confirms the volume mounted) before terminating the node.
+            if statefulset_pods and not wait_for_statefulset_pods_ready(
+                cluster_name=cluster_name, region=region, pods=statefulset_pods
+            ):
+                echo_warning(
+                    f"StatefulSet pods from node {old_pod_id} are not all Ready yet; "
+                    f"terminating the instance anyway — verify them manually.",
+                )
+
             echo_info(f"The worker node: {old_pod_id} has been deleted. Terminating Worker Node: {instance}...")
             worker_terminate(instance, region=region)
             terminated_ids.append(instance)

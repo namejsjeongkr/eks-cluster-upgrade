@@ -9,7 +9,7 @@ import time
 from abc import ABC
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
 from kubernetes import client as k8s_client
@@ -59,8 +59,6 @@ else:
     WaiterConfigTypeDef = object
     AutoScalingGroupsTypeTypeDef = object
     AutoScalingGroupTypeDef = object
-
-from eksupgrade.utils import get_logger
 
 logger = get_logger(__name__)
 
