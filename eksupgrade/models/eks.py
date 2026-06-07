@@ -64,6 +64,18 @@ from eksupgrade.utils import get_logger
 
 logger = get_logger(__name__)
 
+
+def _default_next_minor(version: str) -> str:
+    """Return the next minor version string (e.g. '1.29' -> '1.30').
+
+    Used as the default upgrade target when none is supplied. Increments the
+    minor as an integer — unlike the old float-based math, which broke at every
+    X.9 -> X.10 boundary (e.g. '1.29' -> '1.3', '1.9' -> '1.91').
+    """
+    parsed = Version(version)
+    return f"{parsed.major}.{parsed.minor + 1}"
+
+
 TOKEN_PREFIX: str = "k8s-aws-v1"
 TOKEN_HEADER_KEY: str = "x-k8s-aws-id"
 
@@ -661,7 +673,7 @@ class Cluster(EksResource):
         """Perform the post initialization steps."""
         self._register_k8s_aws_id_handlers()
         self.load_config()
-        self.target_version = self.target_version or str(float(self.version) + 0.01)
+        self.target_version = self.target_version or _default_next_minor(self.version)
         self.active_waiter = self.eks_client.get_waiter("cluster_active")
 
     def _register_k8s_aws_id_handlers(self) -> None:
@@ -775,8 +787,11 @@ class Cluster(EksResource):
             return None
 
         if self._target_version_object.minor > self._version_object.minor + 1:
+            next_hop = _default_next_minor(self.version)
             echo_error(
-                f"Cluster: {self.name} can't be upgraded more than one minor at a time! Please adjust the target cluster version and try again!",
+                f"Cluster: {self.name} can't be upgraded more than one minor at a time "
+                f"({self.version} -> {self.target_version}). EKS only allows sequential minor "
+                f"upgrades — run eksupgrade once per minor, starting with target {next_hop}.",
             )
             raise InvalidUpgradeTargetVersion()
 
