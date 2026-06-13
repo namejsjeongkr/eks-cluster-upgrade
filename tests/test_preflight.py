@@ -1,10 +1,16 @@
 """Test the preflight read-only check module."""
 
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from eksupgrade.src.preflight import PreflightFinding, PreflightResult, _check_addons, _check_control_plane
+from eksupgrade.src.preflight import (
+    PreflightFinding,
+    PreflightResult,
+    _check_addons,
+    _check_control_plane,
+    _check_managed_nodegroups,
+)
 
 
 def _finding(severity: str) -> PreflightFinding:
@@ -115,3 +121,64 @@ def test_addons_warning_on_lookup_failure() -> None:
     cluster.addons = [bad]
     findings = _check_addons(cluster)
     assert any(f.item == "vpc-cni" and f.severity == "warning" for f in findings)
+
+
+def _ng(name, ami_type, version="1.32"):
+    n = MagicMock()
+    n.name = name
+    n.ami_type = ami_type
+    n.version = version
+    return n
+
+
+def test_managed_ng_pass_non_custom() -> None:
+    cluster = MagicMock()
+    cluster.version = "1.32"
+    cluster.target_version = "1.33"
+    cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
+    findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
+    assert any(f.item == "ng-al2" and f.severity == "pass" for f in findings)
+
+
+def test_managed_ng_custom_pass_when_ami_resolves() -> None:
+    cluster = MagicMock()
+    cluster.version = "1.32"
+    cluster.target_version = "1.33"
+    cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
+    with patch("eksupgrade.src.preflight.get_latest_ami", return_value="ami-0abc") as mock_ami:
+        findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
+    assert any(f.item == "ng-br" and f.severity == "pass" and "ami-0abc" in f.detail for f in findings)
+    # Argument contract must mirror the working self_managed.py CUSTOM call.
+    mock_ami.assert_called_once_with("1.33", "bottlerocket", "bottlerocket", "ap-northeast-2")
+
+
+def test_managed_ng_custom_blocking_when_ami_resolve_fails() -> None:
+    cluster = MagicMock()
+    cluster.version = "1.32"
+    cluster.target_version = "1.33"
+    cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
+    with patch("eksupgrade.src.preflight.get_latest_ami", side_effect=RuntimeError("no ami")):
+        findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
+    assert any(f.item == "ng-br" and f.severity == "blocking" for f in findings)
+
+
+def test_managed_ng_custom_ami_resolves_via_real_ssm_path() -> None:
+    # Mock at the boto/ssm layer (not get_latest_ami) so the argument mapping is
+    # actually exercised: the bottlerocket branch builds an SSM path from instance_type.
+    cluster = MagicMock()
+    cluster.version = "1.32"
+    cluster.target_version = "1.33"
+    cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
+
+    fake_ssm = MagicMock()
+    fake_ssm.get_parameters.return_value = {"Parameters": [{"Value": "ami-real"}]}
+    fake_ec2 = MagicMock()
+
+    def _client(service, region_name=None):
+        return fake_ssm if service == "ssm" else fake_ec2
+
+    with patch("eksupgrade.src.latest_ami.boto3.client", side_effect=_client):
+        findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
+    assert any(f.item == "ng-br" and f.severity == "pass" and "ami-real" in f.detail for f in findings)
+    called_names = fake_ssm.get_parameters.call_args.kwargs.get("Names") or fake_ssm.get_parameters.call_args.args[0]
+    assert any("bottlerocket/aws-k8s-1.33" in n for n in called_names)

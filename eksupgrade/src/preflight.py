@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from packaging.version import parse as parse_version
 
 from eksupgrade.models.eks import _default_next_minor
+from eksupgrade.src.latest_ami import get_latest_ami
 
 _VALID_SEVERITIES: frozenset[str] = frozenset({"pass", "warning", "blocking"})
 
@@ -99,6 +100,36 @@ def _check_control_plane(cluster) -> list[PreflightFinding]:
                 f"Multi-minor jump {cluster.version} -> {cluster.target_version}; EKS allows one minor at a time (next: {next_hop})",
             )
         )
+
+    return findings
+
+
+def _check_managed_nodegroups(cluster, region: str) -> list[PreflightFinding]:
+    """Check each managed node group; for CUSTOM amiType, verify target AMI resolves.
+
+    For CUSTOM the tool must resolve a new AMI itself (AWS rejects version-only
+    updates), so a failed resolve is blocking. Non-CUSTOM groups are AWS-managed
+    rolling upgrades and only reported as pass.
+    """
+    findings: list[PreflightFinding] = []
+    area = "Managed NodeGroups"
+
+    for ng in cluster.nodegroups:
+        if ng.ami_type != "CUSTOM":
+            findings.append(
+                PreflightFinding(area, ng.name, "pass", f"amiType {ng.ami_type}; AWS-managed rolling upgrade")
+            )
+            continue
+
+        try:
+            # Mirror the working self_managed.py CUSTOM call: get_latest_ami keys the
+            # OS family off instance_type, so both instance_type and image_to_search
+            # carry the os_type hint. We assume CUSTOM == Bottlerocket here (the only
+            # CUSTOM family this tool resolves); this is a documented simplification.
+            ami = get_latest_ami(cluster.target_version, "bottlerocket", "bottlerocket", region)
+            findings.append(PreflightFinding(area, ng.name, "pass", f"CUSTOM; target AMI resolves to {ami}"))
+        except Exception as exc:  # noqa: BLE001 - read-only check must not abort
+            findings.append(PreflightFinding(area, ng.name, "blocking", f"CUSTOM; could not resolve target AMI: {exc}"))
 
     return findings
 
