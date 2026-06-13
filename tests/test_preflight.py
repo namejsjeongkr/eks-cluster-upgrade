@@ -1,8 +1,10 @@
 """Test the preflight read-only check module."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from eksupgrade.src.preflight import PreflightFinding, PreflightResult
+from eksupgrade.src.preflight import PreflightFinding, PreflightResult, _check_control_plane
 
 
 def _finding(severity: str) -> PreflightFinding:
@@ -41,3 +43,34 @@ def test_exit_code_two_overrides_blocking() -> None:
 def test_invalid_severity_rejected() -> None:
     with pytest.raises(ValueError):
         PreflightFinding(area="x", item="y", severity="bloking", detail="z")
+
+
+def _cluster(version="1.32", target_version="1.33", status="ACTIVE"):
+    c = MagicMock()
+    c.version = version
+    c.target_version = target_version
+    c.status = status
+    c.active = status == "ACTIVE"
+    c.updating = status == "UPDATING"
+    return c
+
+
+def test_control_plane_pass_single_minor_active() -> None:
+    findings = _check_control_plane(_cluster("1.32", "1.33", "ACTIVE"))
+    assert any(f.severity == "pass" for f in findings)
+    assert not any(f.severity == "blocking" for f in findings)
+
+
+def test_control_plane_blocking_when_updating() -> None:
+    findings = _check_control_plane(_cluster("1.32", "1.33", "UPDATING"))
+    assert any(f.severity == "blocking" and "UPDATING" in f.detail for f in findings)
+
+
+def test_control_plane_blocking_on_multi_minor() -> None:
+    findings = _check_control_plane(_cluster("1.32", "1.34", "ACTIVE"))
+    assert any(f.severity == "blocking" and "minor" in f.detail.lower() for f in findings)
+
+
+def test_control_plane_warns_when_already_target() -> None:
+    findings = _check_control_plane(_cluster("1.33", "1.33", "ACTIVE"))
+    assert any(f.severity == "warning" for f in findings)

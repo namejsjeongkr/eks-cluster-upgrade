@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from eksupgrade.models.eks import _default_next_minor
+
 _VALID_SEVERITIES: frozenset[str] = frozenset({"pass", "warning", "blocking"})
 
 
@@ -49,3 +51,45 @@ class PreflightResult:
         if self.check_failed:
             return 2
         return 1 if self.blocking_count > 0 else 0
+
+
+def _check_control_plane(cluster) -> list[PreflightFinding]:
+    """Check that the control plane can move one minor version, and is ACTIVE."""
+    findings: list[PreflightFinding] = []
+    area = "Control Plane"
+
+    if cluster.updating:
+        findings.append(
+            PreflightFinding(
+                area, "status", "blocking", f"Cluster is UPDATING ({cluster.status}); wait for it to finish"
+            )
+        )
+    elif not cluster.active:
+        findings.append(
+            PreflightFinding(area, "status", "blocking", f"Cluster is not ACTIVE (status: {cluster.status})")
+        )
+    else:
+        findings.append(PreflightFinding(area, "status", "pass", "Cluster is ACTIVE"))
+
+    if cluster.version == cluster.target_version:
+        findings.append(
+            PreflightFinding(
+                area, "version", "warning", f"Already on target version {cluster.version}; nothing to upgrade"
+            )
+        )
+    elif cluster.target_version == _default_next_minor(cluster.version):
+        findings.append(
+            PreflightFinding(area, "version", "pass", f"{cluster.version} -> {cluster.target_version} (single minor)")
+        )
+    else:
+        next_hop = _default_next_minor(cluster.version)
+        findings.append(
+            PreflightFinding(
+                area,
+                "version",
+                "blocking",
+                f"Multi-minor jump {cluster.version} -> {cluster.target_version}; EKS allows one minor at a time (next: {next_hop})",
+            )
+        )
+
+    return findings
