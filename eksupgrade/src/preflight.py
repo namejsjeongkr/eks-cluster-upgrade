@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 
 from kubernetes import client as k8s_client
 from packaging.version import parse as parse_version
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from eksupgrade.models.eks import _default_next_minor
 from eksupgrade.src.k8s_client import loading_config
@@ -201,6 +204,55 @@ def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
         findings.append(PreflightFinding(area, name, "warning" if style == "pinned" else "pass", detail))
 
     return findings
+
+
+_SEVERITY_BADGE = {"pass": "[green]PASS[/green]", "warning": "[yellow]WARN[/yellow]", "blocking": "[red]BLOCK[/red]"}
+
+
+def _render_report(cluster, result: PreflightResult) -> None:
+    """Print a rich summary report (areas as tables, overall verdict at the bottom)."""
+    console = Console()
+    console.print(
+        Panel(
+            f"Cluster: [bold]{cluster.name}[/bold]   "
+            f"{cluster.version} -> {cluster.target_version}   region: {cluster.region}",
+            title="eksupgrade preflight (read-only)",
+        )
+    )
+
+    areas = ["Control Plane", "Addons", "Managed NodeGroups", "Karpenter"]
+    for area in areas:
+        rows = [f for f in result.findings if f.area == area]
+        if not rows:
+            continue
+        table = Table(title=area, show_lines=False)
+        table.add_column("Item")
+        table.add_column("Status")
+        table.add_column("Detail")
+        for f in rows:
+            table.add_row(f.item, _SEVERITY_BADGE.get(f.severity, f.severity), f.detail)
+        console.print(table)
+
+    if result.blocking_count > 0:
+        verdict = "[red]NOT SAFE — resolve blocking issues before upgrading[/red]"
+    elif result.warning_count > 0:
+        verdict = "[yellow]SAFE TO UPGRADE — review warnings[/yellow]"
+    else:
+        verdict = "[green]SAFE TO UPGRADE[/green]"
+    console.print(f"\nBlocking: {result.blocking_count}   Warnings: {result.warning_count}   {verdict}")
+
+
+def run_preflight(cluster, region: str) -> PreflightResult:
+    """Run all read-only preflight checks, print a report, and return the result."""
+    findings: list[PreflightFinding] = []
+    findings += _check_control_plane(cluster)
+    findings += _check_addons(cluster)
+    findings += _check_managed_nodegroups(cluster, region)
+    findings += _check_karpenter(cluster, region)
+
+    result = PreflightResult(findings=findings, check_failed=False)
+    _render_report(cluster, result)
+    return result
 
 
 def _check_addons(cluster) -> list[PreflightFinding]:

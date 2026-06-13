@@ -11,6 +11,7 @@ from eksupgrade.src.preflight import (
     _check_control_plane,
     _check_karpenter,
     _check_managed_nodegroups,
+    run_preflight,
 )
 
 
@@ -245,3 +246,30 @@ def test_karpenter_warns_on_pinned_nodeclass() -> None:
     ):
         findings = _check_karpenter(cluster, region="ap-northeast-2")
     assert any(f.item == "custom" and f.severity == "warning" and "pinned" in f.detail for f in findings)
+
+
+def test_run_preflight_aggregates_and_returns_result() -> None:
+    cluster = _cluster("1.32", "1.33", "ACTIVE")
+    cluster.name = "c"
+    cluster.region = "ap-northeast-2"
+    cluster.addons = [_addon("coredns", "v1.11.4", "v1.12.4", ["v1.12.4"])]
+    cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
+    with patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")):
+        result = run_preflight(cluster, region="ap-northeast-2")
+    assert isinstance(result, PreflightResult)
+    assert result.blocking_count == 0
+    assert result.exit_code() == 0
+    areas = {f.area for f in result.findings}
+    assert {"Control Plane", "Addons", "Managed NodeGroups", "Karpenter"} <= areas
+
+
+def test_run_preflight_blocking_bubbles_to_exit_code() -> None:
+    cluster = _cluster("1.32", "1.34", "ACTIVE")  # multi-minor => blocking
+    cluster.name = "c"
+    cluster.region = "ap-northeast-2"
+    cluster.addons = []
+    cluster.nodegroups = []
+    with patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")):
+        result = run_preflight(cluster, region="ap-northeast-2")
+    assert result.blocking_count >= 1
+    assert result.exit_code() == 1
