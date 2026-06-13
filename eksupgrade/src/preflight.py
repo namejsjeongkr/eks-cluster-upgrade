@@ -13,9 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from kubernetes import client as k8s_client
 from packaging.version import parse as parse_version
 
 from eksupgrade.models.eks import _default_next_minor
+from eksupgrade.src.karpenter import _list_nodeclaims, _list_nodepools, classify_ami_selector, get_ec2nodeclasses
 from eksupgrade.src.latest_ami import get_latest_ami
 
 _VALID_SEVERITIES: frozenset[str] = frozenset({"pass", "warning", "blocking"})
@@ -145,6 +147,51 @@ def _check_managed_nodegroups(cluster, region: str) -> list[PreflightFinding]:
                     area, ng.name, "blocking", f"CUSTOM (assumed Bottlerocket); could not resolve target AMI: {exc}"
                 )
             )
+
+    return findings
+
+
+def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
+    """Inspect Karpenter NodeClasses/NodePools/NodeClaims read-only.
+
+    Karpenter node upgrades happen via drift, not by this tool, so nothing here
+    is blocking. We surface the AMI-selector style (alias auto-drifts; pinned
+    does not) and warn on a broken state (orphaned NodeClaims with no NodePool).
+    """
+    findings: list[PreflightFinding] = []
+    area = "Karpenter"
+
+    try:
+        nodeclasses = get_ec2nodeclasses(cluster.name, region)
+    except Exception:  # noqa: BLE001 - CRD absence means Karpenter not in use
+        return [PreflightFinding(area, "karpenter", "pass", "Karpenter not detected (skipped)")]
+
+    custom_api = k8s_client.CustomObjectsApi()
+    nodepools = _list_nodepools(custom_api)
+    nodeclaims = _list_nodeclaims(custom_api)
+
+    if not nodeclasses and not nodepools and nodeclaims:
+        findings.append(
+            PreflightFinding(
+                area,
+                "nodeclaims",
+                "warning",
+                f"{len(nodeclaims)} orphaned NodeClaim(s) with no NodePool/EC2NodeClass; Karpenter controller likely removed",
+            )
+        )
+        return findings
+
+    if not nodeclasses and not nodepools and not nodeclaims:
+        return [PreflightFinding(area, "karpenter", "pass", "Karpenter not in use (no NodePools)")]
+
+    for nc in nodeclasses:
+        name = nc.get("metadata", {}).get("name", "?")
+        style = classify_ami_selector(nc)
+        if style == "alias":
+            detail = "alias selector; nodes auto-drift on control-plane upgrade"
+        else:
+            detail = "pinned selector (id/name/tags); nodes will NOT auto-drift"
+        findings.append(PreflightFinding(area, name, "warning" if style == "pinned" else "pass", detail))
 
     return findings
 

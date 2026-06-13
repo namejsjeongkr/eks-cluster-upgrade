@@ -9,6 +9,7 @@ from eksupgrade.src.preflight import (
     PreflightResult,
     _check_addons,
     _check_control_plane,
+    _check_karpenter,
     _check_managed_nodegroups,
 )
 
@@ -192,3 +193,36 @@ def test_managed_ng_custom_blocking_when_ami_unresolved() -> None:
     with patch("eksupgrade.src.preflight.get_latest_ami", return_value="NAN"):
         findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
     assert any(f.item == "ng-br" and f.severity == "blocking" for f in findings)
+
+
+def test_karpenter_skip_when_no_crd() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    cluster.region = "ap-northeast-2"
+    with patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("not found")):
+        findings = _check_karpenter(cluster, region="ap-northeast-2")
+    assert not any(f.severity == "blocking" for f in findings)
+
+
+def test_karpenter_pass_with_alias_nodeclass() -> None:
+    cluster = MagicMock()
+    nc = {"metadata": {"name": "default"}, "spec": {"amiSelectorTerms": [{"alias": "bottlerocket@latest"}]}}
+    with (
+        patch("eksupgrade.src.preflight.get_ec2nodeclasses", return_value=[nc]),
+        patch("eksupgrade.src.preflight._list_nodepools", return_value=[{"metadata": {"name": "np"}}]),
+        patch("eksupgrade.src.preflight._list_nodeclaims", return_value=[]),
+    ):
+        findings = _check_karpenter(cluster, region="ap-northeast-2")
+    assert any("alias" in f.detail for f in findings)
+    assert not any(f.severity == "blocking" for f in findings)
+
+
+def test_karpenter_warns_on_orphaned_nodeclaims() -> None:
+    cluster = MagicMock()
+    with (
+        patch("eksupgrade.src.preflight.get_ec2nodeclasses", return_value=[]),
+        patch("eksupgrade.src.preflight._list_nodepools", return_value=[]),
+        patch("eksupgrade.src.preflight._list_nodeclaims", return_value=[{"metadata": {"name": "nc-1"}}]),
+    ):
+        findings = _check_karpenter(cluster, region="ap-northeast-2")
+    assert any(f.severity == "warning" and "orphan" in f.detail.lower() for f in findings)
