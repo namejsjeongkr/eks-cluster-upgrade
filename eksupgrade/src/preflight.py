@@ -212,6 +212,10 @@ def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
 def _pdb_covers(pdb_match_labels: dict, workload_labels: dict) -> bool:
     """True if every PDB selector label is present (subset match) in the workload labels."""
     if not pdb_match_labels:
+        # An empty selector matches everything in k8s, but we treat it as
+        # non-covering to stay conservative (a false "uncovered" warning is
+        # low-harm; masking a real gap is worse). matchExpressions are not
+        # evaluated, so a PDB using only matchExpressions lands here too.
         return False
     return all(workload_labels.get(k) == v for k, v in pdb_match_labels.items())
 
@@ -221,6 +225,11 @@ def _check_pod_disruption_budgets(cluster, region: str) -> list[PreflightFinding
 
     During an upgrade these workloads are drained without an availability floor.
     Read-only: lists Deployments/StatefulSets and PDBs. Never blocking.
+
+    Coverage is judged by matchLabels subset-match within the same namespace.
+    PDB matchExpressions are NOT evaluated, so a PDB selecting purely via
+    matchExpressions may produce a false "uncovered" warning (acceptable for a
+    warning-only check; the operator can verify).
     """
     area = "Pod Disruption Budgets"
     try:

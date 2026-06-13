@@ -365,7 +365,12 @@ def test_pdb_skips_single_replica() -> None:
     cluster = MagicMock()
     cluster.name = "c"
     apps, policy = _patch_pdb_listers(
-        deployments=[_workload("app", "solo", 1, {"app": "solo"})], statefulsets=[], pdbs=[]
+        deployments=[
+            _workload("app", "solo", 1, {"app": "solo"}),
+            _workload("app", "notset", None, {"app": "notset"}),  # replicas=None -> treated as 0
+        ],
+        statefulsets=[],
+        pdbs=[],
     )
     with (
         patch("eksupgrade.src.preflight.loading_config"),
@@ -374,6 +379,7 @@ def test_pdb_skips_single_replica() -> None:
     ):
         findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
     assert not any(f.item == "app/solo" for f in findings)
+    assert not any(f.item == "app/notset" for f in findings)
 
 
 def test_pdb_wrong_namespace_does_not_cover() -> None:
