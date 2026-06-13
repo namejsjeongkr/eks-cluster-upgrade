@@ -16,8 +16,6 @@ CustomObjectsApi / CoreV1Api are mocked so no cluster is required.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from eksupgrade.src.karpenter import (
     classify_ami_selector,
     get_ec2nodeclasses,

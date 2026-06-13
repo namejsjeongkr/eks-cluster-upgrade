@@ -12,9 +12,8 @@ import queue
 import re
 import threading
 import time
-from typing import Any
-
 from functools import cache
+from typing import Any
 
 import boto3
 from botocore.signers import RequestSigner

@@ -12,11 +12,7 @@ Note: /aws/service/* SSM paths are AWS-reserved and cannot be written via
       moto mock_ssm. All SSM-backed tests patch the boto3 SSM client directly.
 """
 
-from unittest.mock import MagicMock, call, patch
-
-import boto3
-import pytest
-from moto import mock_ec2
+from unittest.mock import MagicMock, patch
 
 from eksupgrade.src.latest_ami import get_latest_ami
 
@@ -60,9 +56,9 @@ class TestAL2023AMI:
             )
 
         assert result == expected
-        assert any(f"amazon-linux-2023/x86_64" in n for n in captured_names), (
-            f"Expected x86_64 AL2023 SSM path, got: {captured_names}"
-        )
+        assert any(
+            "amazon-linux-2023/x86_64" in n for n in captured_names
+        ), f"Expected x86_64 AL2023 SSM path, got: {captured_names}"
 
     def test_arm64_detected_from_image_name(self, region) -> None:
         expected = "ami-al2023-arm64"
@@ -85,9 +81,7 @@ class TestAL2023AMI:
             )
 
         assert result == expected
-        assert any("arm64" in n for n in captured_names), (
-            f"Expected arm64 SSM path, got: {captured_names}"
-        )
+        assert any("arm64" in n for n in captured_names), f"Expected arm64 SSM path, got: {captured_names}"
 
     def test_arm64_detected_from_instance_type_string(self, region) -> None:
         """arm64 keyword in instance_type should select the arm64 SSM path."""
@@ -139,12 +133,10 @@ class TestAL2023AMI:
 
         assert not any(
             "amazon-linux-2/recommended" in n for n in captured_names
-        ), (
-            f"AL2023 was incorrectly routed to the AL2 SSM path. Requested: {captured_names}"
-        )
-        assert any("amazon-linux-2023" in n for n in captured_names), (
-            f"AL2023 SSM path not used. Requested: {captured_names}"
-        )
+        ), f"AL2023 was incorrectly routed to the AL2 SSM path. Requested: {captured_names}"
+        assert any(
+            "amazon-linux-2023" in n for n in captured_names
+        ), f"AL2023 SSM path not used. Requested: {captured_names}"
 
 
 class TestAL2AMI:
@@ -171,9 +163,9 @@ class TestAL2AMI:
             )
 
         assert result == expected
-        assert any("amazon-linux-2/recommended" in n for n in captured_names), (
-            f"Expected AL2 SSM path, got: {captured_names}"
-        )
+        assert any(
+            "amazon-linux-2/recommended" in n for n in captured_names
+        ), f"Expected AL2 SSM path, got: {captured_names}"
 
     def test_al2_arm64_uses_arm64_ssm_path(self, region) -> None:
         """AL2 arm64 must use the 'amazon-linux-2-arm64' SSM path, not the x86_64 path."""
@@ -197,12 +189,12 @@ class TestAL2AMI:
             )
 
         assert result == expected
-        assert any("amazon-linux-2-arm64" in n for n in captured_names), (
-            f"Expected AL2 arm64 SSM path (amazon-linux-2-arm64), got: {captured_names}"
-        )
-        assert not any("amazon-linux-2/recommended" in n for n in captured_names), (
-            f"AL2 arm64 must NOT use x86_64 path, got: {captured_names}"
-        )
+        assert any(
+            "amazon-linux-2-arm64" in n for n in captured_names
+        ), f"Expected AL2 arm64 SSM path (amazon-linux-2-arm64), got: {captured_names}"
+        assert not any(
+            "amazon-linux-2/recommended" in n for n in captured_names
+        ), f"AL2 arm64 must NOT use x86_64 path, got: {captured_names}"
 
     def test_al2_os_string_does_not_use_al2023_path(self, region) -> None:
         captured_names: list = []
@@ -223,9 +215,9 @@ class TestAL2AMI:
                 region,
             )
 
-        assert not any("amazon-linux-2023" in n for n in captured_names), (
-            f"AL2 was incorrectly routed to AL2023 SSM path. Requested: {captured_names}"
-        )
+        assert not any(
+            "amazon-linux-2023" in n for n in captured_names
+        ), f"AL2 was incorrectly routed to AL2023 SSM path. Requested: {captured_names}"
 
 
 class TestBottlerocketAMI:
@@ -252,9 +244,9 @@ class TestBottlerocketAMI:
             )
 
         assert result == expected
-        assert any(f"aws-k8s-{K8S_VERSION}/x86_64" in n for n in captured_names), (
-            f"Expected x86_64 Bottlerocket SSM path, got: {captured_names}"
-        )
+        assert any(
+            f"aws-k8s-{K8S_VERSION}/x86_64" in n for n in captured_names
+        ), f"Expected x86_64 Bottlerocket SSM path, got: {captured_names}"
 
     def test_arm64_uses_correct_ssm_path(self, region) -> None:
         expected = "ami-bottlerocket-arm64"
@@ -277,9 +269,9 @@ class TestBottlerocketAMI:
             )
 
         assert result == expected
-        assert any(f"aws-k8s-{K8S_VERSION}/arm64" in n for n in captured_names), (
-            f"Expected arm64 Bottlerocket SSM path, got: {captured_names}"
-        )
+        assert any(
+            f"aws-k8s-{K8S_VERSION}/arm64" in n for n in captured_names
+        ), f"Expected arm64 Bottlerocket SSM path, got: {captured_names}"
 
 
 class TestUbuntuAMI:

@@ -3,7 +3,7 @@
 from kubernetes.client.api.core_v1_api import CoreV1Api
 from kubernetes.client.api_client import ApiClient
 
-from eksupgrade.models.eks import Cluster, ClusterAddon, requires_cluster
+from eksupgrade.models.eks import Cluster, ClusterAddon
 
 
 def test_cluster_resource(eks_client, eks_cluster, cluster_name, region) -> None:

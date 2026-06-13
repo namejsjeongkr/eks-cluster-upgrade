@@ -17,6 +17,7 @@ from .exceptions import ClusterInactiveException
 from .models.eks import Cluster
 from .src.k8s_client import cluster_auto_enable_disable, is_cluster_auto_scaler_present, is_karpenter_present
 from .src.karpenter import handle_karpenter_drift
+from .src.preflight import run_preflight
 from .starter import StatsWorker, actual_update
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -40,7 +41,7 @@ def main(
     region: str = typer.Argument(..., help="The AWS region where the target cluster resides"),
     max_retry: int = typer.Option(default=2, help="The most number of times to retry an upgrade"),
     force: bool = typer.Option(default=False, help="Force the upgrade (e.g. pod eviction with PDB)"),
-    preflight: bool = typer.Option(default=False, help="Run pre-upgrade checks without upgrade"),
+    preflight: bool = typer.Option(default=False, help="Run read-only pre-upgrade checks and exit without upgrading"),
     parallel: bool = typer.Option(default=False, help="Upgrade all nodegroups in parallel"),
     latest_addons: bool = typer.Option(
         default=False, help="Upgrade addons to the latest eligible version instead of default"
@@ -54,16 +55,10 @@ def main(
     ),
 ) -> None:
     """Run eksupgrade against a target cluster."""
-    queue = Queue()
+    queue: Queue[list[str | int | bool]] = Queue()
 
     if disable_checks:
         echo_warning("--disable-checks is currently unused until the new validation workflows are implemented")
-
-    if preflight:
-        echo_warning(
-            "--preflight is unused and will be removed in an upcoming release. "
-            "Please use an EKS upgrade readiness assessment tool such as: github.com/clowdhaus/eksup"
-        )
 
     # Initialize autoscaler state variables before try block
     is_ca_present: bool = False
@@ -78,6 +73,24 @@ def main(
         target_cluster: Cluster = Cluster.get(
             cluster_name=cluster_name, region=region, target_version=cluster_version, latest_addons=latest_addons
         )
+
+        # Preflight is a read-only assessment: report and exit before any mutation
+        # (and before announcing an upgrade). This also defuses the
+        # --preflight --no-interactive trap: we always Exit here, never reaching
+        # the confirm prompt or update_cluster().
+        if preflight:
+            try:
+                preflight_result = run_preflight(target_cluster, region)
+            except typer.Exit:
+                raise
+            except Exception as preflight_error:  # noqa: BLE001
+                # A crash in the checks themselves means we could not assess the
+                # cluster. Surface that as exit code 2 ("could not run") instead of
+                # letting the broad handler below swallow it into a success exit.
+                echo_error(f"Preflight checks could not run: {preflight_error}")
+                raise typer.Exit(code=2) from preflight_error
+            raise typer.Exit(code=preflight_result.exit_code())
+
         echo_info(
             f"Upgrading cluster: {cluster_name} from version: {target_cluster.version} to {target_cluster.target_version}...",
         )
@@ -212,6 +225,10 @@ def main(
         echo_info(f"EKS Cluster {cluster_name} UPDATED TO {cluster_version}")
     except typer.Abort:
         echo_warning("Cluster upgrade aborted!")
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError -> Exception, so the broad handler
+        # below would otherwise swallow our clean preflight exit. Let it propagate.
+        raise
     except Exception as error:
         # Try to re-enable autoscalers even on error
         if is_ca_present:

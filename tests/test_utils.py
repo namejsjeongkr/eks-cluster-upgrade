@@ -2,14 +2,7 @@
 
 from typer.testing import CliRunner
 
-from eksupgrade.utils import (
-    confirm,
-    echo_deprecation,
-    echo_error,
-    echo_info,
-    echo_success,
-    echo_warning,
-)
+from eksupgrade.utils import confirm, echo_deprecation, echo_error, echo_info, echo_success, echo_warning
 
 runner = CliRunner()
 
@@ -26,7 +19,8 @@ def test_echo_error(app) -> None:
     """Test the echo error method."""
     app.command()(echo_error)
     result = runner.invoke(app, ["this is a error"])
-    assert "this is a error" in result.stdout
+    # echo_error writes to stderr (err=True); result.output captures both streams.
+    assert "this is a error" in result.output
     assert result.exit_code == 0
 
 
