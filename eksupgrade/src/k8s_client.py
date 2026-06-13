@@ -8,8 +8,10 @@ Attributes:
 from __future__ import annotations
 
 import base64
+import os
 import queue
 import re
+import tempfile
 import threading
 import time
 from functools import cache
@@ -80,13 +82,32 @@ def get_bearer_token(cluster_id: str, region: str) -> str:
     return "k8s-aws-v1." + re.sub(r"=*", "", base64_url)
 
 
+_CA_CERT_FILES: dict[str, str] = {}
+
+
+def _ca_cert_path(endpoint: str, ca_data_b64: str) -> str:
+    """Decode a base64 PEM cluster CA to a temp file (cached per endpoint) and return its path."""
+    cached = _CA_CERT_FILES.get(endpoint)
+    if cached and os.path.exists(cached):
+        return cached
+    _CA_CERT_FILES.pop(endpoint, None)  # discard a stale (deleted-file) entry before rewriting
+    fd, path = tempfile.mkstemp(prefix="eksupgrade-ca-", suffix=".pem")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(base64.b64decode(ca_data_b64))
+    _CA_CERT_FILES[endpoint] = path
+    return path
+
+
 def loading_config(cluster_name: str, region: str) -> str:
-    """loading kubeconfig with sts"""
+    """Configure the default kubernetes client from EKS describe-cluster (CA + STS bearer token)."""
     eks = boto3.client("eks", region_name=region)
     resp = eks.describe_cluster(name=cluster_name)
+    endpoint = resp["cluster"]["endpoint"]
+    ca_data = resp["cluster"]["certificateAuthority"]["data"]
     configs = client.Configuration()
-    configs.host = resp["cluster"]["endpoint"]
+    configs.host = endpoint
     configs.verify_ssl = True
+    configs.ssl_ca_cert = _ca_cert_path(endpoint, ca_data)
     configs.debug = False
     configs.api_key = {"authorization": "Bearer " + get_bearer_token(cluster_name, region)}
     client.Configuration.set_default(configs)
