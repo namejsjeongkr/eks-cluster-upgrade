@@ -101,3 +101,28 @@ def _check_control_plane(cluster) -> list[PreflightFinding]:
         )
 
     return findings
+
+
+def _check_addons(cluster) -> list[PreflightFinding]:
+    """Check each installed addon has a target-compatible version available."""
+    findings: list[PreflightFinding] = []
+    area = "Addons"
+
+    for addon in cluster.addons:
+        try:
+            available = addon.available_versions
+            target = addon.target_version
+        except Exception as exc:  # noqa: BLE001 - read-only check must not abort
+            findings.append(
+                PreflightFinding(area, addon.name, "warning", f"Could not resolve compatible versions: {exc}")
+            )
+            continue
+
+        if available:
+            findings.append(PreflightFinding(area, addon.name, "pass", f"{addon.version} -> {target or available[0]}"))
+        else:
+            findings.append(
+                PreflightFinding(area, addon.name, "blocking", "No compatible version for target cluster version")
+            )
+
+    return findings

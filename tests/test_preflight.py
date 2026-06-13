@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from eksupgrade.src.preflight import PreflightFinding, PreflightResult, _check_control_plane
+from eksupgrade.src.preflight import PreflightFinding, PreflightResult, _check_addons, _check_control_plane
 
 
 def _finding(severity: str) -> PreflightFinding:
@@ -81,3 +81,38 @@ def test_control_plane_warns_when_already_target() -> None:
 def test_control_plane_blocking_on_downgrade() -> None:
     findings = _check_control_plane(_cluster("1.33", "1.31", "ACTIVE"))
     assert any(f.severity == "blocking" and "downgrade" in f.detail.lower() for f in findings)
+
+
+def _addon(name, version, target_version, available_versions, needs_upgrade=True):
+    a = MagicMock()
+    a.name = name
+    a.version = version
+    a.target_version = target_version
+    a.available_versions = available_versions
+    a.needs_upgrade = needs_upgrade
+    return a
+
+
+def test_addons_pass_when_compatible_version_exists() -> None:
+    cluster = MagicMock()
+    cluster.addons = [_addon("coredns", "v1.11.4", "v1.12.4", ["v1.12.4", "v1.11.4"])]
+    findings = _check_addons(cluster)
+    assert any(f.item == "coredns" and f.severity == "pass" for f in findings)
+
+
+def test_addons_blocking_when_no_compatible_version() -> None:
+    cluster = MagicMock()
+    cluster.addons = [_addon("coredns", "v1.11.4", "", [])]
+    findings = _check_addons(cluster)
+    assert any(f.item == "coredns" and f.severity == "blocking" for f in findings)
+
+
+def test_addons_warning_on_lookup_failure() -> None:
+    # available_versions raising simulates a describe_addon_versions failure.
+    bad = MagicMock()
+    bad.name = "vpc-cni"
+    type(bad).available_versions = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+    cluster = MagicMock()
+    cluster.addons = [bad]
+    findings = _check_addons(cluster)
+    assert any(f.item == "vpc-cni" and f.severity == "warning" for f in findings)
