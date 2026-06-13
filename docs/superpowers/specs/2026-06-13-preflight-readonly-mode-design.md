@@ -68,6 +68,25 @@ def run_preflight(cluster: Cluster, region: str) -> PreflightResult:
 - `_check_addons(cluster) -> list[PreflightFinding]`
 - `_check_managed_nodegroups(cluster, region) -> list[PreflightFinding]`
 - `_check_karpenter(cluster, region) -> list[PreflightFinding]`
+- `_check_pod_disruption_budgets(cluster, region) -> list[PreflightFinding]` (후속 추가)
+
+### 후속 점검: Pod Disruption Budget (PDB) 미커버 경고
+
+업그레이드 중 노드 drain 시, replicas≥2인 워크로드에 PDB가 없으면 가용성이 보장되지
+않은 채로 evict될 수 있다. 이를 사전에 경고한다.
+
+- **대상**: 모든 네임스페이스의 Deployment/StatefulSet 중 `spec.replicas >= 2`.
+- **커버 판정**: 워크로드의 pod 템플릿 라벨(`spec.template.metadata.labels`)이 같은
+  네임스페이스 내 어떤 PDB의 `spec.selector.matchLabels`와 **부분집합 매칭**되는지로
+  판정 (PDB selector의 모든 `{k:v}`가 워크로드 라벨에 포함되면 커버). `matchExpressions`
+  는 단순화하여 "복합 selector(수동 확인)" 정보로 처리한다(오탐 방지).
+- **severity = warning**: PDB 미설정은 업그레이드를 막지 않으므로(drain은 진행됨) exit 0을
+  유지하고 리포트에만 표시한다. 실제 drain 동작과 일치.
+- **read-only API**: `AppsV1Api.list_deployment_for_all_namespaces()`,
+  `list_stateful_set_for_all_namespaces()`, `PolicyV1Api.list_pod_disruption_budget_for_all_namespaces()`.
+  Karpenter 점검과 동일하게 전체를 try/except로 감싸 조회 실패 시 warning 1개로 degrade.
+- **출력**: item = `namespace/workload`, detail = `Deployment, replicas=N, no PDB covers it`.
+  미커버 0개면 영역 요약 pass 1줄.
 
 리포트 출력은 `_render_report(result)` 가 담당 (rich 테이블/패널).
 
