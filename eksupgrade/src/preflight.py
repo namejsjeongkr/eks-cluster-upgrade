@@ -119,7 +119,7 @@ def _check_addons(cluster) -> list[PreflightFinding]:
             continue
 
         if available:
-            findings.append(PreflightFinding(area, addon.name, "pass", f"{addon.version} -> {target or available[0]}"))
+            findings.append(PreflightFinding(area, addon.name, "pass", f"{addon.version} -> {target or '(default)'}"))
         else:
             findings.append(
                 PreflightFinding(area, addon.name, "blocking", "No compatible version for target cluster version")

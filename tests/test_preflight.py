@@ -1,6 +1,6 @@
 """Test the preflight read-only check module."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
@@ -83,13 +83,12 @@ def test_control_plane_blocking_on_downgrade() -> None:
     assert any(f.severity == "blocking" and "downgrade" in f.detail.lower() for f in findings)
 
 
-def _addon(name, version, target_version, available_versions, needs_upgrade=True):
+def _addon(name, version, target_version, available_versions):
     a = MagicMock()
     a.name = name
     a.version = version
     a.target_version = target_version
     a.available_versions = available_versions
-    a.needs_upgrade = needs_upgrade
     return a
 
 
@@ -111,7 +110,7 @@ def test_addons_warning_on_lookup_failure() -> None:
     # available_versions raising simulates a describe_addon_versions failure.
     bad = MagicMock()
     bad.name = "vpc-cni"
-    type(bad).available_versions = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+    type(bad).available_versions = PropertyMock(side_effect=RuntimeError("boom"))
     cluster = MagicMock()
     cluster.addons = [bad]
     findings = _check_addons(cluster)
