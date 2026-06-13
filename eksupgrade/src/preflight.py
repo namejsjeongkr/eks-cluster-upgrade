@@ -209,6 +209,62 @@ def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
     return findings
 
 
+def _pdb_covers(pdb_match_labels: dict, workload_labels: dict) -> bool:
+    """True if every PDB selector label is present (subset match) in the workload labels."""
+    if not pdb_match_labels:
+        return False
+    return all(workload_labels.get(k) == v for k, v in pdb_match_labels.items())
+
+
+def _check_pod_disruption_budgets(cluster, region: str) -> list[PreflightFinding]:
+    """Warn about replicas>=2 workloads not covered by any PodDisruptionBudget.
+
+    During an upgrade these workloads are drained without an availability floor.
+    Read-only: lists Deployments/StatefulSets and PDBs. Never blocking.
+    """
+    area = "Pod Disruption Budgets"
+    try:
+        loading_config(cluster.name, region)
+        apps = k8s_client.AppsV1Api()
+        policy = k8s_client.PolicyV1Api()
+        deployments = apps.list_deployment_for_all_namespaces().items
+        statefulsets = apps.list_stateful_set_for_all_namespaces().items
+        pdbs = policy.list_pod_disruption_budget_for_all_namespaces().items
+    except Exception as exc:  # noqa: BLE001 - read-only check must not abort
+        return [PreflightFinding(area, "pdb", "warning", f"Could not list workloads/PDBs: {exc}")]
+
+    pdbs_by_ns: dict[str, list[dict]] = {}
+    for pdb in pdbs:
+        ns = pdb.metadata.namespace
+        match_labels = (pdb.spec.selector.match_labels if pdb.spec and pdb.spec.selector else None) or {}
+        pdbs_by_ns.setdefault(ns, []).append(match_labels)
+
+    findings: list[PreflightFinding] = []
+    for kind, workloads in (("Deployment", deployments), ("StatefulSet", statefulsets)):
+        for wl in workloads:
+            replicas = wl.spec.replicas or 0
+            if replicas < 2:
+                continue
+            ns = wl.metadata.namespace
+            labels = (
+                wl.spec.template.metadata.labels if wl.spec.template and wl.spec.template.metadata else None
+            ) or {}
+            covered = any(_pdb_covers(ml, labels) for ml in pdbs_by_ns.get(ns, []))
+            if not covered:
+                findings.append(
+                    PreflightFinding(
+                        area,
+                        f"{ns}/{wl.metadata.name}",
+                        "warning",
+                        f"{kind}, replicas={replicas}, no PDB covers it",
+                    )
+                )
+
+    if not findings:
+        findings.append(PreflightFinding(area, "pdb", "pass", "All multi-replica workloads are covered by a PDB"))
+    return findings
+
+
 _SEVERITY_BADGE = {"pass": "[green]PASS[/green]", "warning": "[yellow]WARN[/yellow]", "blocking": "[red]BLOCK[/red]"}
 
 
@@ -259,6 +315,7 @@ def run_preflight(cluster, region: str) -> PreflightResult:
     findings += _check_addons(cluster)
     findings += _check_managed_nodegroups(cluster, region)
     findings += _check_karpenter(cluster, region)
+    findings += _check_pod_disruption_budgets(cluster, region)
 
     result = PreflightResult(findings=findings, check_failed=False)
     _render_report(cluster, result)

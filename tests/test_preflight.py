@@ -11,6 +11,7 @@ from eksupgrade.src.preflight import (
     _check_control_plane,
     _check_karpenter,
     _check_managed_nodegroups,
+    _check_pod_disruption_budgets,
     run_preflight,
 )
 
@@ -268,7 +269,10 @@ def test_run_preflight_aggregates_and_returns_result() -> None:
     cluster.region = "ap-northeast-2"
     cluster.addons = [_addon("coredns", "v1.11.4", "v1.12.4", ["v1.12.4"])]
     cluster.nodegroups = [_ng("ng-al2", "AL2_x86_64")]
-    with patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")):
+    with (
+        patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")),
+        patch("eksupgrade.src.preflight.loading_config", side_effect=Exception("no cluster")),
+    ):
         result = run_preflight(cluster, region="ap-northeast-2")
     assert isinstance(result, PreflightResult)
     assert result.blocking_count == 0
@@ -283,7 +287,138 @@ def test_run_preflight_blocking_bubbles_to_exit_code() -> None:
     cluster.region = "ap-northeast-2"
     cluster.addons = []
     cluster.nodegroups = []
-    with patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")):
+    with (
+        patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("none")),
+        patch("eksupgrade.src.preflight.loading_config", side_effect=Exception("no cluster")),
+    ):
         result = run_preflight(cluster, region="ap-northeast-2")
     assert result.blocking_count >= 1
     assert result.exit_code() == 1
+
+
+def _workload(namespace, name, replicas, template_labels):
+    w = MagicMock()
+    w.metadata.namespace = namespace
+    w.metadata.name = name
+    w.spec.replicas = replicas
+    w.spec.template.metadata.labels = template_labels
+    return w
+
+
+def _pdb(namespace, match_labels, match_expressions=None):
+    p = MagicMock()
+    p.metadata.namespace = namespace
+    p.spec.selector.match_labels = match_labels
+    p.spec.selector.match_expressions = match_expressions
+    return p
+
+
+def _patch_pdb_listers(deployments, statefulsets, pdbs):
+    deploy_resp = MagicMock()
+    deploy_resp.items = deployments
+    sts_resp = MagicMock()
+    sts_resp.items = statefulsets
+    pdb_resp = MagicMock()
+    pdb_resp.items = pdbs
+
+    apps = MagicMock()
+    apps.list_deployment_for_all_namespaces.return_value = deploy_resp
+    apps.list_stateful_set_for_all_namespaces.return_value = sts_resp
+    policy = MagicMock()
+    policy.list_pod_disruption_budget_for_all_namespaces.return_value = pdb_resp
+    return apps, policy
+
+
+def test_pdb_warns_when_multireplica_uncovered() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    apps, policy = _patch_pdb_listers(
+        deployments=[_workload("app", "web", 3, {"app": "web"})], statefulsets=[], pdbs=[]
+    )
+    with (
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight.k8s_client.AppsV1Api", return_value=apps),
+        patch("eksupgrade.src.preflight.k8s_client.PolicyV1Api", return_value=policy),
+    ):
+        findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
+    assert any(f.item == "app/web" and f.severity == "warning" for f in findings)
+
+
+def test_pdb_no_warning_when_covered() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    apps, policy = _patch_pdb_listers(
+        deployments=[_workload("app", "web", 3, {"app": "web", "tier": "frontend"})],
+        statefulsets=[],
+        pdbs=[_pdb("app", {"app": "web"})],
+    )
+    with (
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight.k8s_client.AppsV1Api", return_value=apps),
+        patch("eksupgrade.src.preflight.k8s_client.PolicyV1Api", return_value=policy),
+    ):
+        findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
+    assert not any(f.severity == "warning" for f in findings)
+
+
+def test_pdb_skips_single_replica() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    apps, policy = _patch_pdb_listers(
+        deployments=[_workload("app", "solo", 1, {"app": "solo"})], statefulsets=[], pdbs=[]
+    )
+    with (
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight.k8s_client.AppsV1Api", return_value=apps),
+        patch("eksupgrade.src.preflight.k8s_client.PolicyV1Api", return_value=policy),
+    ):
+        findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
+    assert not any(f.item == "app/solo" for f in findings)
+
+
+def test_pdb_wrong_namespace_does_not_cover() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    apps, policy = _patch_pdb_listers(
+        deployments=[_workload("app", "web", 2, {"app": "web"})],
+        statefulsets=[],
+        pdbs=[_pdb("other", {"app": "web"})],
+    )
+    with (
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight.k8s_client.AppsV1Api", return_value=apps),
+        patch("eksupgrade.src.preflight.k8s_client.PolicyV1Api", return_value=policy),
+    ):
+        findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
+    assert any(f.item == "app/web" and f.severity == "warning" for f in findings)
+
+
+def test_pdb_statefulset_covered_and_uncovered() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    apps, policy = _patch_pdb_listers(
+        deployments=[],
+        statefulsets=[
+            _workload("db", "covered", 3, {"app": "covered"}),
+            _workload("db", "bare", 2, {"app": "bare"}),
+        ],
+        pdbs=[_pdb("db", {"app": "covered"})],
+    )
+    with (
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight.k8s_client.AppsV1Api", return_value=apps),
+        patch("eksupgrade.src.preflight.k8s_client.PolicyV1Api", return_value=policy),
+    ):
+        findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
+    items = {f.item: f.severity for f in findings if f.severity == "warning"}
+    assert items.get("db/bare") == "warning"
+    assert "db/covered" not in items
+
+
+def test_pdb_warns_on_lookup_failure() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    with patch("eksupgrade.src.preflight.loading_config", side_effect=RuntimeError("api down")):
+        findings = _check_pod_disruption_budgets(cluster, region="ap-northeast-2")
+    assert any(f.severity == "warning" and "could not" in f.detail.lower() for f in findings)
+    assert not any(f.severity == "blocking" for f in findings)
