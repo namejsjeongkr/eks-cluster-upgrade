@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from packaging.version import parse as parse_version
+
 from eksupgrade.models.eks import _default_next_minor
 
 _VALID_SEVERITIES: frozenset[str] = frozenset({"pass", "warning", "blocking"})
@@ -75,6 +77,12 @@ def _check_control_plane(cluster) -> list[PreflightFinding]:
         findings.append(
             PreflightFinding(
                 area, "version", "warning", f"Already on target version {cluster.version}; nothing to upgrade"
+            )
+        )
+    elif parse_version(cluster.target_version) < parse_version(cluster.version):
+        findings.append(
+            PreflightFinding(
+                area, "version", "blocking", f"Downgrade {cluster.version} -> {cluster.target_version} is not supported"
             )
         )
     elif cluster.target_version == _default_next_minor(cluster.version):

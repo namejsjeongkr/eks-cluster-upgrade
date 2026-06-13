@@ -57,8 +57,9 @@ def _cluster(version="1.32", target_version="1.33", status="ACTIVE"):
 
 def test_control_plane_pass_single_minor_active() -> None:
     findings = _check_control_plane(_cluster("1.32", "1.33", "ACTIVE"))
-    assert any(f.severity == "pass" for f in findings)
-    assert not any(f.severity == "blocking" for f in findings)
+    by_item = {f.item: f.severity for f in findings}
+    assert by_item["status"] == "pass"
+    assert by_item["version"] == "pass"
 
 
 def test_control_plane_blocking_when_updating() -> None:
@@ -74,3 +75,9 @@ def test_control_plane_blocking_on_multi_minor() -> None:
 def test_control_plane_warns_when_already_target() -> None:
     findings = _check_control_plane(_cluster("1.33", "1.33", "ACTIVE"))
     assert any(f.severity == "warning" for f in findings)
+    assert not any(f.severity == "blocking" for f in findings)
+
+
+def test_control_plane_blocking_on_downgrade() -> None:
+    findings = _check_control_plane(_cluster("1.33", "1.31", "ACTIVE"))
+    assert any(f.severity == "blocking" and "downgrade" in f.detail.lower() for f in findings)
