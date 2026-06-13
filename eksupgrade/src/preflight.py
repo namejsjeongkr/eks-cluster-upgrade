@@ -220,8 +220,9 @@ def _render_report(cluster, result: PreflightResult) -> None:
         )
     )
 
-    areas = ["Control Plane", "Addons", "Managed NodeGroups", "Karpenter"]
-    for area in areas:
+    # Derive areas from findings (insertion-ordered) so a new check can never be
+    # silently omitted from the report by forgetting to list it here.
+    for area in dict.fromkeys(f.area for f in result.findings):
         rows = [f for f in result.findings if f.area == area]
         if not rows:
             continue
@@ -243,7 +244,13 @@ def _render_report(cluster, result: PreflightResult) -> None:
 
 
 def run_preflight(cluster, region: str) -> PreflightResult:
-    """Run all read-only preflight checks, print a report, and return the result."""
+    """Run all read-only preflight checks, print a report, and return the result.
+
+    Each individual check absorbs its own read-only lookup failures (recording
+    them as warnings), so this function always returns check_failed=False. The
+    exit-code-2 "could not run the checks at all" case is owned by the caller
+    (cli.py), which wraps the preceding Cluster.get() in its own error handling.
+    """
     findings: list[PreflightFinding] = []
     findings += _check_control_plane(cluster)
     findings += _check_addons(cluster)
