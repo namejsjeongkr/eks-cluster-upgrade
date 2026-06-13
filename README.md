@@ -100,12 +100,27 @@ twice (`1.34 → 1.35`, then `1.35 → 1.36`).
 
 You need permissions for both AWS and the Kubernetes cluster.
 
-1. Install from source (this fork is not published to PyPI):
+1. Install from source (this fork is not published to PyPI).
+
+   **Recommended — install the `eksupgrade` command with [pipx](https://pipx.pypa.io)**
+   (isolated, and puts `eksupgrade` on your `PATH`):
+
+```sh
+git clone https://github.com/namejsjeongkr/eksupgrade.git
+pipx install ./eksupgrade
+eksupgrade --help
+```
+
+   To upgrade later after pulling new changes: `pipx install --force ./eksupgrade`.
+
+   **Alternative — for development**, use Poetry inside the cloned repo. Commands
+   then run as `poetry run eksupgrade ...`:
 
 ```sh
 git clone https://github.com/namejsjeongkr/eksupgrade.git
 cd eksupgrade
 poetry install
+poetry run eksupgrade --help
 ```
 
 2. AWS permissions — an example minimum policy:
@@ -164,8 +179,11 @@ aws eks update-kubeconfig --name <CLUSTER-NAME> --region <REGION>
 
 ## Usage
 
+> Examples below use the `eksupgrade` command (pipx install). If you installed
+> with Poetry for development, prefix each command with `poetry run`.
+
 ```sh
-poetry run eksupgrade --help
+eksupgrade --help
 ```
 
 ```sh
@@ -191,7 +209,7 @@ poetry run eksupgrade --help
 Example:
 
 ```sh
-poetry run eksupgrade my-cluster 1.35 ap-northeast-2
+eksupgrade my-cluster 1.35 ap-northeast-2
 ```
 
 ### Read-only preflight
@@ -199,11 +217,12 @@ poetry run eksupgrade my-cluster 1.35 ap-northeast-2
 Run a read-only assessment without changing anything:
 
 ```sh
-poetry run eksupgrade <cluster> <target-version> <region> --preflight --no-interactive
+eksupgrade <cluster> <target-version> <region> --preflight --no-interactive
 ```
 
-It checks the control plane, addons, managed node groups, and Karpenter, prints a
-summary report, and exits without performing any upgrade. Exit codes: `0` safe
+It checks the control plane, add-ons, managed node groups, Karpenter, and
+PodDisruptionBudget coverage (warning on replicas≥2 workloads with no PDB), prints
+a summary report, and exits without performing any upgrade. Exit codes: `0` safe
 (warnings allowed), `1` blocking issues found, `2` the checks could not run.
 
 ## Known limitations
