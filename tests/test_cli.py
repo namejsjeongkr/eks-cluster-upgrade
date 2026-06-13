@@ -18,4 +18,5 @@ def test_entry_no_arg() -> None:
     """Test the entry method with no arguments."""
     result = runner.invoke(app, [])
     assert result.exit_code == 2
-    assert "OPTIONS" in result.stdout
+    # Newer Click routes usage errors to stderr; result.output captures both streams.
+    assert "OPTIONS" in result.output

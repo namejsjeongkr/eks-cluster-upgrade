@@ -28,6 +28,7 @@ def test_image_type(ec2_client, region, node_type, image_id) -> None:
 # AL2023 support
 # ---------------------------------------------------------------------------
 
+
 class TestAL2023ImageType:
     """AL2023 nodes must use the al2023 AMI name filter."""
 
@@ -38,9 +39,7 @@ class TestAL2023ImageType:
 
         with patch(_EC2_MODULE) as mock_boto3:
             mock_ec2 = MagicMock()
-            mock_ec2.describe_images.return_value = {
-                "Images": [{"ImageId": ami_id, "Name": ami_name}]
-            }
+            mock_ec2.describe_images.return_value = {"Images": [{"ImageId": ami_id, "Name": ami_name}]}
             mock_boto3.return_value = mock_ec2
 
             result = image_type(
@@ -56,9 +55,7 @@ class TestAL2023ImageType:
         with patch(_EC2_MODULE) as mock_boto3:
             mock_ec2 = MagicMock()
             mock_ec2.describe_images.return_value = {
-                "Images": [
-                    {"ImageId": "ami-al2023", "Name": "amazon-eks-node-al2023-x86_64-standard-1.32"}
-                ]
+                "Images": [{"ImageId": "ami-al2023", "Name": "amazon-eks-node-al2023-x86_64-standard-1.32"}]
             }
             mock_boto3.return_value = mock_ec2
 
@@ -70,9 +67,9 @@ class TestAL2023ImageType:
 
             filters = mock_ec2.describe_images.call_args[1]["Filters"]
             name_filter = next(f for f in filters if f["Name"] == "name")
-            assert "al2023" in name_filter["Values"][0].lower(), (
-                f"AL2023 node must use al2023 filter, got: {name_filter['Values']}"
-            )
+            assert (
+                "al2023" in name_filter["Values"][0].lower()
+            ), f"AL2023 node must use al2023 filter, got: {name_filter['Values']}"
 
     def test_al2023_not_matched_by_al2_filter(self, region) -> None:
         """'amazon linux 2023' must NOT match the 'amazon-eks-node*' (AL2) filter.
@@ -99,9 +96,9 @@ class TestAL2023ImageType:
             filters = mock_ec2.describe_images.call_args[1]["Filters"]
             name_filter = next(f for f in filters if f["Name"] == "name")
             # The filter pattern must be for AL2023, not the generic AL2 pattern
-            assert name_filter["Values"][0] != "amazon-eks-node*", (
-                "AL2023 node type used the AL2 name filter — substring bug detected"
-            )
+            assert (
+                name_filter["Values"][0] != "amazon-eks-node*"
+            ), "AL2023 node type used the AL2 name filter — substring bug detected"
             assert "al2023" in name_filter["Values"][0].lower()
 
 
@@ -109,14 +106,18 @@ class TestAL2023ImageType:
 # Existing node types (additional coverage)
 # ---------------------------------------------------------------------------
 
+
 class TestKnownNodeTypes:
     """Verify filter patterns for AL2, Bottlerocket, and Windows."""
 
-    @pytest.mark.parametrize("node_type,expected_pattern", [
-        ("Amazon Linux 2 Kernel 5.10", "amazon-eks-node*"),
-        ("Bottlerocket OS 1.15.0", "bottlerocket-aws-k8s-*"),
-        ("Windows Server 2022 Datacenter", "Windows_Server-*-English-*-EKS_Optimized*"),
-    ])
+    @pytest.mark.parametrize(
+        "node_type,expected_pattern",
+        [
+            ("Amazon Linux 2 Kernel 5.10", "amazon-eks-node*"),
+            ("Bottlerocket OS 1.15.0", "bottlerocket-aws-k8s-*"),
+            ("Windows Server 2022 Datacenter", "Windows_Server-*-English-*-EKS_Optimized*"),
+        ],
+    )
     def test_correct_filter_pattern_used(self, region, node_type, expected_pattern) -> None:
         with patch(_EC2_MODULE) as mock_boto3:
             mock_ec2 = MagicMock()
@@ -127,9 +128,9 @@ class TestKnownNodeTypes:
 
             filters = mock_ec2.describe_images.call_args[1]["Filters"]
             name_filter = next(f for f in filters if f["Name"] == "name")
-            assert name_filter["Values"][0] == expected_pattern, (
-                f"node_type '{node_type}' used wrong filter: {name_filter['Values'][0]!r}"
-            )
+            assert (
+                name_filter["Values"][0] == expected_pattern
+            ), f"node_type '{node_type}' used wrong filter: {name_filter['Values'][0]!r}"
 
 
 class TestUnsupportedNodeType:

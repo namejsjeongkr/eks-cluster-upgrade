@@ -11,8 +11,6 @@ from the node.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from eksupgrade.src.k8s_client import get_statefulset_pods_on_node, wait_for_statefulset_pods_ready
 
 CLUSTER = "test-cluster"
