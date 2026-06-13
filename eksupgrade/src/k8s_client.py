@@ -90,6 +90,7 @@ def _ca_cert_path(endpoint: str, ca_data_b64: str) -> str:
     cached = _CA_CERT_FILES.get(endpoint)
     if cached and os.path.exists(cached):
         return cached
+    _CA_CERT_FILES.pop(endpoint, None)  # discard a stale (deleted-file) entry before rewriting
     fd, path = tempfile.mkstemp(prefix="eksupgrade-ca-", suffix=".pem")
     with os.fdopen(fd, "wb") as fh:
         fh.write(base64.b64decode(ca_data_b64))
@@ -98,7 +99,7 @@ def _ca_cert_path(endpoint: str, ca_data_b64: str) -> str:
 
 
 def loading_config(cluster_name: str, region: str) -> str:
-    """loading kubeconfig with sts"""
+    """Configure the default kubernetes client from EKS describe-cluster (CA + STS bearer token)."""
     eks = boto3.client("eks", region_name=region)
     resp = eks.describe_cluster(name=cluster_name)
     endpoint = resp["cluster"]["endpoint"]

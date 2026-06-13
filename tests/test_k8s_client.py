@@ -20,8 +20,11 @@ def test_loading_config(eks_client, eks_cluster, cluster_name, region) -> None:
     assert result == "Initialized"
 
 
-def test_loading_config_sets_cluster_ca(tmp_path) -> None:
+def test_loading_config_sets_cluster_ca() -> None:
     """loading_config must wire ssl_ca_cert to a file holding the decoded cluster CA."""
+    from eksupgrade.src.k8s_client import _CA_CERT_FILES
+
+    _CA_CERT_FILES.clear()
     fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFAKECERTDATA\n-----END CERTIFICATE-----\n"
     fake_ca_b64 = base64.b64encode(fake_ca_pem).decode("utf-8")
 
