@@ -17,6 +17,7 @@ from kubernetes import client as k8s_client
 from packaging.version import parse as parse_version
 
 from eksupgrade.models.eks import _default_next_minor
+from eksupgrade.src.k8s_client import loading_config
 from eksupgrade.src.karpenter import _list_nodeclaims, _list_nodepools, classify_ami_selector, get_ec2nodeclasses
 from eksupgrade.src.latest_ami import get_latest_ami
 
@@ -166,6 +167,9 @@ def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
     except Exception:  # noqa: BLE001 - CRD absence means Karpenter not in use
         return [PreflightFinding(area, "karpenter", "pass", "Karpenter not detected (skipped)")]
 
+    # get_ec2nodeclasses configures kube access internally; call loading_config
+    # explicitly here too so this does not depend on that hidden side-effect.
+    loading_config(cluster.name, region)
     custom_api = k8s_client.CustomObjectsApi()
     nodepools = _list_nodepools(custom_api)
     nodeclaims = _list_nodeclaims(custom_api)
@@ -176,11 +180,14 @@ def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
                 area,
                 "nodeclaims",
                 "warning",
-                f"{len(nodeclaims)} orphaned NodeClaim(s) with no NodePool/EC2NodeClass; Karpenter controller likely removed",
+                f"{len(nodeclaims)} NodeClaim(s) remain but no NodePool/EC2NodeClass exist; Karpenter stack appears torn down (manual cleanup likely needed)",
             )
         )
         return findings
 
+    # Reaches here only when nodeclasses/nodepools are both empty and no nodeclaims
+    # remain (the orphaned-claims case returned above). A non-empty nodeclasses set
+    # falls through to the per-class loop below.
     if not nodeclasses and not nodepools and not nodeclaims:
         return [PreflightFinding(area, "karpenter", "pass", "Karpenter not in use (no NodePools)")]
 

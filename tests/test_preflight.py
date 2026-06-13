@@ -201,7 +201,9 @@ def test_karpenter_skip_when_no_crd() -> None:
     cluster.region = "ap-northeast-2"
     with patch("eksupgrade.src.preflight.get_ec2nodeclasses", side_effect=Exception("not found")):
         findings = _check_karpenter(cluster, region="ap-northeast-2")
-    assert not any(f.severity == "blocking" for f in findings)
+    assert len(findings) == 1
+    assert findings[0].severity == "pass"
+    assert "not detected" in findings[0].detail
 
 
 def test_karpenter_pass_with_alias_nodeclass() -> None:
@@ -209,6 +211,7 @@ def test_karpenter_pass_with_alias_nodeclass() -> None:
     nc = {"metadata": {"name": "default"}, "spec": {"amiSelectorTerms": [{"alias": "bottlerocket@latest"}]}}
     with (
         patch("eksupgrade.src.preflight.get_ec2nodeclasses", return_value=[nc]),
+        patch("eksupgrade.src.preflight.loading_config"),
         patch("eksupgrade.src.preflight._list_nodepools", return_value=[{"metadata": {"name": "np"}}]),
         patch("eksupgrade.src.preflight._list_nodeclaims", return_value=[]),
     ):
@@ -219,10 +222,26 @@ def test_karpenter_pass_with_alias_nodeclass() -> None:
 
 def test_karpenter_warns_on_orphaned_nodeclaims() -> None:
     cluster = MagicMock()
+    cluster.name = "c"
     with (
         patch("eksupgrade.src.preflight.get_ec2nodeclasses", return_value=[]),
+        patch("eksupgrade.src.preflight.loading_config"),
         patch("eksupgrade.src.preflight._list_nodepools", return_value=[]),
         patch("eksupgrade.src.preflight._list_nodeclaims", return_value=[{"metadata": {"name": "nc-1"}}]),
     ):
         findings = _check_karpenter(cluster, region="ap-northeast-2")
-    assert any(f.severity == "warning" and "orphan" in f.detail.lower() for f in findings)
+    assert any(f.severity == "warning" and "torn down" in f.detail.lower() for f in findings)
+
+
+def test_karpenter_warns_on_pinned_nodeclass() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    nc = {"metadata": {"name": "custom"}, "spec": {"amiSelectorTerms": [{"id": "ami-abc123"}]}}
+    with (
+        patch("eksupgrade.src.preflight.get_ec2nodeclasses", return_value=[nc]),
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight._list_nodepools", return_value=[{"metadata": {"name": "np"}}]),
+        patch("eksupgrade.src.preflight._list_nodeclaims", return_value=[]),
+    ):
+        findings = _check_karpenter(cluster, region="ap-northeast-2")
+    assert any(f.item == "custom" and f.severity == "warning" and "pinned" in f.detail for f in findings)
