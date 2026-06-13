@@ -248,6 +248,20 @@ def test_karpenter_warns_on_pinned_nodeclass() -> None:
     assert any(f.item == "custom" and f.severity == "warning" and "pinned" in f.detail for f in findings)
 
 
+def test_karpenter_warns_when_nodepool_listing_fails() -> None:
+    cluster = MagicMock()
+    cluster.name = "c"
+    nc = {"metadata": {"name": "default"}, "spec": {"amiSelectorTerms": [{"alias": "bottlerocket@latest"}]}}
+    with (
+        patch("eksupgrade.src.preflight.get_ec2nodeclasses", return_value=[nc]),
+        patch("eksupgrade.src.preflight.loading_config"),
+        patch("eksupgrade.src.preflight._list_nodepools", side_effect=RuntimeError("api down")),
+    ):
+        findings = _check_karpenter(cluster, region="ap-northeast-2")
+    assert any(f.severity == "warning" and "could not list" in f.detail.lower() for f in findings)
+    assert not any(f.severity == "blocking" for f in findings)
+
+
 def test_run_preflight_aggregates_and_returns_result() -> None:
     cluster = _cluster("1.32", "1.33", "ACTIVE")
     cluster.name = "c"

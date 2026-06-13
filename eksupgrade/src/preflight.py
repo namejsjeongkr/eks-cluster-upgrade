@@ -170,12 +170,15 @@ def _check_karpenter(cluster, region: str) -> list[PreflightFinding]:
     except Exception:  # noqa: BLE001 - CRD absence means Karpenter not in use
         return [PreflightFinding(area, "karpenter", "pass", "Karpenter not detected (skipped)")]
 
-    # get_ec2nodeclasses configures kube access internally; call loading_config
-    # explicitly here too so this does not depend on that hidden side-effect.
-    loading_config(cluster.name, region)
-    custom_api = k8s_client.CustomObjectsApi()
-    nodepools = _list_nodepools(custom_api)
-    nodeclaims = _list_nodeclaims(custom_api)
+    try:
+        # get_ec2nodeclasses configures kube access internally; call loading_config
+        # explicitly here too so this does not depend on that hidden side-effect.
+        loading_config(cluster.name, region)
+        custom_api = k8s_client.CustomObjectsApi()
+        nodepools = _list_nodepools(custom_api)
+        nodeclaims = _list_nodeclaims(custom_api)
+    except Exception as exc:  # noqa: BLE001 - read-only check must not abort
+        return [PreflightFinding(area, "karpenter", "warning", f"Could not list NodePools/NodeClaims: {exc}")]
 
     if not nodeclasses and not nodepools and nodeclaims:
         findings.append(

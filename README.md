@@ -194,6 +194,18 @@ Example:
 poetry run eksupgrade my-cluster 1.35 ap-northeast-2
 ```
 
+### Read-only preflight
+
+Run a read-only assessment without changing anything:
+
+```sh
+poetry run eksupgrade <cluster> <target-version> <region> --preflight --no-interactive
+```
+
+It checks the control plane, addons, managed node groups, and Karpenter, prints a
+summary report, and exits without performing any upgrade. Exit codes: `0` safe
+(warnings allowed), `1` blocking issues found, `2` the checks could not run.
+
 ## Known limitations
 
 - Karpenter logic is covered by unit tests against mocked CRDs. The Karpenter v1
