@@ -40,3 +40,14 @@ def test_preflight_runs_check_and_exits_without_upgrade() -> None:
     fake_cluster.update_cluster.assert_not_called()
     fake_cluster.upgrade_addons.assert_not_called()
     assert result.exit_code == 0
+
+
+def test_preflight_crash_exits_nonzero() -> None:
+    fake_cluster = MagicMock()
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.run_preflight", side_effect=RuntimeError("kube down")),
+    ):
+        result = runner.invoke(app, ["my-cluster", "1.33", "ap-northeast-2", "--preflight", "--no-interactive"])
+    fake_cluster.update_cluster.assert_not_called()
+    assert result.exit_code == 2

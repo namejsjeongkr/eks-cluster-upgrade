@@ -79,7 +79,16 @@ def main(
         # --preflight --no-interactive trap: we always Exit here, never reaching
         # the confirm prompt or update_cluster().
         if preflight:
-            preflight_result = run_preflight(target_cluster, region)
+            try:
+                preflight_result = run_preflight(target_cluster, region)
+            except typer.Exit:
+                raise
+            except Exception as preflight_error:  # noqa: BLE001
+                # A crash in the checks themselves means we could not assess the
+                # cluster. Surface that as exit code 2 ("could not run") instead of
+                # letting the broad handler below swallow it into a success exit.
+                echo_error(f"Preflight checks could not run: {preflight_error}")
+                raise typer.Exit(code=2) from preflight_error
             raise typer.Exit(code=preflight_result.exit_code())
 
         echo_info(
