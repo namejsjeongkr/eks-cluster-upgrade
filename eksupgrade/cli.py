@@ -41,7 +41,7 @@ def main(
     region: str = typer.Argument(..., help="The AWS region where the target cluster resides"),
     max_retry: int = typer.Option(default=2, help="The most number of times to retry an upgrade"),
     force: bool = typer.Option(default=False, help="Force the upgrade (e.g. pod eviction with PDB)"),
-    preflight: bool = typer.Option(default=False, help="Run pre-upgrade checks without upgrade"),
+    preflight: bool = typer.Option(default=False, help="Run read-only pre-upgrade checks and exit without upgrading"),
     parallel: bool = typer.Option(default=False, help="Upgrade all nodegroups in parallel"),
     latest_addons: bool = typer.Option(
         default=False, help="Upgrade addons to the latest eligible version instead of default"
@@ -55,7 +55,7 @@ def main(
     ),
 ) -> None:
     """Run eksupgrade against a target cluster."""
-    queue = Queue()
+    queue: Queue[list[str | int | bool]] = Queue()
 
     if disable_checks:
         echo_warning("--disable-checks is currently unused until the new validation workflows are implemented")
