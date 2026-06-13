@@ -182,3 +182,13 @@ def test_managed_ng_custom_ami_resolves_via_real_ssm_path() -> None:
     assert any(f.item == "ng-br" and f.severity == "pass" and "ami-real" in f.detail for f in findings)
     called_names = fake_ssm.get_parameters.call_args.kwargs.get("Names") or fake_ssm.get_parameters.call_args.args[0]
     assert any("bottlerocket/aws-k8s-1.33" in n for n in called_names)
+
+
+def test_managed_ng_custom_blocking_when_ami_unresolved() -> None:
+    cluster = MagicMock()
+    cluster.version = "1.32"
+    cluster.target_version = "1.33"
+    cluster.nodegroups = [_ng("ng-br", "CUSTOM")]
+    with patch("eksupgrade.src.preflight.get_latest_ami", return_value="NAN"):
+        findings = _check_managed_nodegroups(cluster, region="ap-northeast-2")
+    assert any(f.item == "ng-br" and f.severity == "blocking" for f in findings)

@@ -127,9 +127,24 @@ def _check_managed_nodegroups(cluster, region: str) -> list[PreflightFinding]:
             # carry the os_type hint. We assume CUSTOM == Bottlerocket here (the only
             # CUSTOM family this tool resolves); this is a documented simplification.
             ami = get_latest_ami(cluster.target_version, "bottlerocket", "bottlerocket", region)
-            findings.append(PreflightFinding(area, ng.name, "pass", f"CUSTOM; target AMI resolves to {ami}"))
+            if not ami or ami == "NAN":
+                findings.append(
+                    PreflightFinding(
+                        area, ng.name, "blocking", "CUSTOM (assumed Bottlerocket); target AMI did not resolve"
+                    )
+                )
+            else:
+                findings.append(
+                    PreflightFinding(
+                        area, ng.name, "pass", f"CUSTOM (assumed Bottlerocket); target AMI resolves to {ami}"
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 - read-only check must not abort
-            findings.append(PreflightFinding(area, ng.name, "blocking", f"CUSTOM; could not resolve target AMI: {exc}"))
+            findings.append(
+                PreflightFinding(
+                    area, ng.name, "blocking", f"CUSTOM (assumed Bottlerocket); could not resolve target AMI: {exc}"
+                )
+            )
 
     return findings
 
