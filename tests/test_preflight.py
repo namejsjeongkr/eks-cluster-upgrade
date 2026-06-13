@@ -1,5 +1,7 @@
 """Test the preflight read-only check module."""
 
+import pytest
+
 from eksupgrade.src.preflight import PreflightFinding, PreflightResult
 
 
@@ -28,3 +30,14 @@ def test_exit_code_two_when_check_failed() -> None:
     # check_failed overrides everything, even if no blocking findings.
     result = PreflightResult(findings=[_finding("pass")], check_failed=True)
     assert result.exit_code() == 2
+
+
+def test_exit_code_two_overrides_blocking() -> None:
+    # check_failed (exit 2) must win even when blocking findings exist.
+    result = PreflightResult(findings=[_finding("blocking")], check_failed=True)
+    assert result.exit_code() == 2
+
+
+def test_invalid_severity_rejected() -> None:
+    with pytest.raises(ValueError):
+        PreflightFinding(area="x", item="y", severity="bloking", detail="z")

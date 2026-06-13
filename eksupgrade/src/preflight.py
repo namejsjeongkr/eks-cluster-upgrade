@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+_VALID_SEVERITIES: frozenset[str] = frozenset({"pass", "warning", "blocking"})
+
 
 @dataclass
 class PreflightFinding:
@@ -22,6 +24,10 @@ class PreflightFinding:
     item: str
     severity: str  # "pass" | "warning" | "blocking"
     detail: str
+
+    def __post_init__(self) -> None:
+        if self.severity not in _VALID_SEVERITIES:
+            raise ValueError(f"severity must be one of {sorted(_VALID_SEVERITIES)}, got {self.severity!r}")
 
 
 @dataclass
