@@ -50,7 +50,13 @@ lint = ["check-docstrings", "check-ruff"]
 fix = ["isort", "black"]
 test = "pytest --cov=eksupgrade --cov-report=xml --cov-report=term"
 ruff = "ruff check --fix eksupgrade"
-safety = "safety check"
+# Ignored advisories are all in DEV/TEST-only deps (poetry `dev`/`test` groups),
+# never installed with the distributed CLI (pip/pipx), so no runtime exposure.
+# Pinned to exact IDs so genuine runtime vulnerabilities are still reported.
+#   64459, 64396 -> ecdsa (transitive via moto; CVE-2024-23342 Minerva, no upstream fix)
+#   89047        -> black (dev-only formatter)
+#   SFTY-20260122-20373 -> pytest (test-only)
+safety = "safety check --ignore 64459 --ignore 64396 --ignore 89047 --ignore SFTY-20260122-20373"
 bandit = "bandit -r eksupgrade"
 security = ["safety", "bandit"]
 # requires poethepoet outside of poetry.
