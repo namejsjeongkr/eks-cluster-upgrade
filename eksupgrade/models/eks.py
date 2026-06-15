@@ -18,7 +18,7 @@ from packaging.version import Version
 
 from eksupgrade.src.latest_ami import get_latest_ami
 from eksupgrade.src.self_managed import update_current_launch_template_ami
-from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
+from eksupgrade.utils import PhaseTimer, echo_error, echo_info, echo_success, echo_warning, get_logger
 
 from ..exceptions import EksException, InvalidUpgradeTargetVersion
 from .base import AwsRegionResource
@@ -861,25 +861,72 @@ class Cluster(EksResource):
             self.wait_for_active()
         return update_response_body
 
-    def upgrade_addons(self, wait: bool = False) -> dict[str, Any]:
+    def upgrade_addons(self, wait: bool = False, timer: PhaseTimer | None = None) -> dict[str, Any]:
         """Upgrade all cluster addons."""
         echo_info("The add-ons update has been initiated...")
         upgrade_details: dict[str, Any] = {}
         for addon in self.upgradable_addons:
-            _update_responses: list[UpdateTypeDef] = addon.update(wait=wait)
-            upgrade_details[addon.name] = _update_responses
+            if timer is not None:
+                with timer.phase(f"addon: {addon.name}"):
+                    upgrade_details[addon.name] = addon.update(wait=wait)
+            else:
+                upgrade_details[addon.name] = addon.update(wait=wait)
         return upgrade_details
 
-    def upgrade_nodegroups(self, wait: bool = False) -> dict[str, Any]:
-        """Upgrade all EKS managed nodegroups."""
+    def upgrade_nodegroups(self, wait: bool = False, timer: PhaseTimer | None = None) -> dict[str, Any]:
+        """Upgrade all EKS managed nodegroups.
+
+        Sequential (wait=True): each nodegroup is updated and waited on in turn.
+        Parallel (wait=False): all nodegroups are TRIGGERED first, then we wait for
+        every one to become Active before returning — so the caller never reports
+        completion while a node roll is still InProgress.
+        """
         upgrade_details: dict[str, Any] = {}
-        for nodegroup in self.upgradable_managed_nodegroups:
-            _update_response: UpdateTypeDef = nodegroup.update(wait=wait)
-            _update_id: str = _update_response.get("id", "")
-            _update_status: str = _update_response.get("status", "")
-            echo_info(f"Updating nodegroup: {nodegroup.name} - ID: {_update_id} - Status: {_update_status}")
+        nodegroups = self.upgradable_managed_nodegroups
+
+        if wait:
+            for nodegroup in nodegroups:
+                if timer is not None:
+                    with timer.phase(f"nodegroup: {nodegroup.name}"):
+                        _update_response = nodegroup.update(wait=True)
+                else:
+                    _update_response = nodegroup.update(wait=True)
+                self._log_nodegroup_update(nodegroup, _update_response)
+                upgrade_details[nodegroup.name] = _update_response
+            return upgrade_details
+
+        records: dict[str, Any] = {}
+        # Parallel: trigger every nodegroup first, THEN wait for all — so we use
+        # manual timer.start/finish rather than the `phase` contextmanager (which
+        # would force trigger+wait per nodegroup, i.e. sequential).
+        for nodegroup in nodegroups:
+            if timer is not None:
+                records[nodegroup.name] = timer.start(f"nodegroup: {nodegroup.name}")
+            _update_response = nodegroup.update(wait=False)
+            self._log_nodegroup_update(nodegroup, _update_response)
             upgrade_details[nodegroup.name] = _update_response
+        for nodegroup in nodegroups:
+            try:
+                nodegroup.wait_for_active()
+                if timer is not None:
+                    timer.finish(records[nodegroup.name], status="completed")
+            except Exception:
+                # Abort: close every still-open record as failed, otherwise the
+                # already-triggered-but-not-yet-waited records stay "running"
+                # forever and corrupt the summary table.
+                if timer is not None:
+                    for rec in records.values():
+                        if rec.end_mono is None:
+                            timer.finish(rec, status="failed")
+                raise
         return upgrade_details
+
+    @staticmethod
+    def _log_nodegroup_update(nodegroup: "ManagedNodeGroup", update_response: dict[str, Any]) -> None:
+        """Echo a managed nodegroup update's id/status line."""
+        _update_id = update_response.get("id", "")
+        _update_status = update_response.get("status", "")
+        echo_info(f"Updating nodegroup: {nodegroup.name} - ID: {_update_id} - Status: {_update_status}")
 
     def get_token(self) -> str:
         """Generate a presigned url token to pass to client.

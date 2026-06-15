@@ -8,6 +8,7 @@ from kubernetes.client.api_client import ApiClient
 
 from eksupgrade.exceptions import EksException
 from eksupgrade.models.eks import Cluster, ClusterAddon, ManagedNodeGroup
+from eksupgrade.utils import PhaseTimer
 
 
 def test_cluster_resource(eks_client, eks_cluster, cluster_name, region) -> None:
@@ -281,3 +282,66 @@ def test_resolve_custom_target_ami_raises_on_unresolvable_os(ec2_client, eks_cli
             ng._resolve_custom_target_ami()
 
     assert "target AMI" in str(exc_info.value)
+
+
+def _mock_ng(name):
+    """Build a mock managed nodegroup with update/wait_for_active behavior."""
+    ng = MagicMock()
+    ng.name = name
+    ng.update.return_value = {"id": "u-" + name, "status": "InProgress"}
+    return ng
+
+
+def _cluster_with_ngs(ngs):
+    """Build a Cluster and pre-seed the upgradable_managed_nodegroups cached_property.
+
+    cached_property stores its value in the instance __dict__ under the attribute
+    name, so seeding it short-circuits the (AWS-touching) computation.
+    """
+    cluster = Cluster(arn="abc", name="eks-test", version="1.32", target_version="1.33", region="ap-northeast-2")
+    cluster.eks_client = MagicMock()
+    cluster.__dict__["upgradable_managed_nodegroups"] = ngs
+    return cluster
+
+
+def test_upgrade_nodegroups_sequential_wraps_each_in_phase(eks_client, region) -> None:
+    """Sequential (wait=True): each NG updated with wait=True and wrapped in its own phase."""
+    ngs = [_mock_ng("a"), _mock_ng("b")]
+    cluster = _cluster_with_ngs(ngs)
+    timer = PhaseTimer()
+
+    cluster.upgrade_nodegroups(wait=True, timer=timer)
+
+    for ng in ngs:
+        ng.update.assert_called_once_with(wait=True)
+    names = {r.name for r in timer.records}
+    assert names == {"nodegroup: a", "nodegroup: b"}
+    assert all(r.status == "completed" for r in timer.records)
+
+
+def test_upgrade_nodegroups_parallel_triggers_then_waits_for_all(eks_client, region) -> None:
+    """Parallel (wait=False): trigger all NGs first, then wait_for_active on each (false-completion guard)."""
+    ngs = [_mock_ng("a"), _mock_ng("b")]
+    cluster = _cluster_with_ngs(ngs)
+    timer = PhaseTimer()
+
+    cluster.upgrade_nodegroups(wait=False, timer=timer)
+
+    for ng in ngs:
+        ng.update.assert_called_once_with(wait=False)
+        ng.wait_for_active.assert_called_once()
+    assert all(r.status == "completed" for r in timer.records)
+    assert len(timer.records) == 2
+
+
+def test_upgrade_nodegroups_parallel_partial_failure_no_record_left_running():
+    """A mid-wait failure must close every still-open record, not leave later NGs 'running'."""
+    ngs = [_mock_ng("a"), _mock_ng("b")]
+    ngs[0].wait_for_active.side_effect = RuntimeError("a stuck")
+    cluster = _cluster_with_ngs(ngs)
+    timer = PhaseTimer()
+    with pytest.raises(RuntimeError):
+        cluster.upgrade_nodegroups(wait=False, timer=timer)
+    # No record may be left in "running" — the aborting run must close them all.
+    assert all(r.status != "running" for r in timer.records)
+    assert len(timer.records) == 2
