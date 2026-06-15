@@ -98,3 +98,26 @@ def test_cluster_addon_resource_update_kwargs(eks_client, eks_cluster, cluster_n
 #     assert not addon_dict["resource_id"]
 #     assert not addon_dict["tags"]
 #     assert len(addon_dict.keys()) == 17
+
+
+def test_addon_version_parsing_tolerates_eksbuild_suffix(eks_client, eks_cluster, cluster_name, region) -> None:
+    """Real EKS addon versions carry a -eksbuild.N suffix that packaging rejects unless stripped."""
+    cluster_resource = Cluster.get(cluster_name, region)
+    cluster_resource.latest_addons = False
+    addon_resource = ClusterAddon(
+        arn="abc",
+        name="coredns",
+        cluster=cluster_resource,
+        region=region,
+        owner="amazon",
+        publisher="amazon",
+        version="v1.39.0-eksbuild.1",
+    )
+    # Override the cached AWS-backed properties with realistic eksbuild-suffixed strings.
+    addon_resource.__dict__["available_versions"] = ["v1.61.1-eksbuild.1", "v1.39.0-eksbuild.1"]
+    addon_resource.__dict__["default_version"] = "v1.61.1-eksbuild.1"
+
+    # These must NOT raise packaging.version.InvalidVersion:
+    assert addon_resource.sorted_versions[0] == "v1.61.1-eksbuild.1"
+    assert addon_resource.needs_upgrade is True
+    assert addon_resource.target_version == "v1.61.1-eksbuild.1"

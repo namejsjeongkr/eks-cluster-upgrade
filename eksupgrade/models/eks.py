@@ -15,7 +15,6 @@ import boto3
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from packaging.version import Version
-from packaging.version import parse as parse_version
 
 from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
 
@@ -61,6 +60,11 @@ else:
     AutoScalingGroupTypeDef = object
 
 logger = get_logger(__name__)
+
+
+def _addon_semver(version: str) -> Version:
+    """Parse an EKS addon version, stripping the ``-eksbuild.N`` suffix packaging rejects."""
+    return Version(re.sub(r"-eksbuild.*", "", version))
 
 
 def _default_next_minor(version: str) -> str:
@@ -535,18 +539,18 @@ class ClusterAddon(EksResource):
 
     @cached_property
     def sorted_versions(self) -> list[str]:
-        """Return the latest version."""
-        return sorted(self.available_versions, reverse=True, key=parse_version)
+        """Return available versions sorted latest-first (EKS eksbuild suffix tolerated)."""
+        return sorted(self.available_versions, reverse=True, key=_addon_semver)
 
     @cached_property
     def semantic_version(self) -> Version:
         """Return the current version without eks platform details in the string."""
-        return Version(re.sub(r"-eksbuild.*", "", self.version))
+        return _addon_semver(self.version)
 
     @property
     def semantic_versions(self) -> list[Version]:
         """Return the list of semantic versions sorted with latest first."""
-        return [Version(re.sub(r"-eksbuild.*", "", version)) for version in self.sorted_versions]
+        return [_addon_semver(version) for version in self.sorted_versions]
 
     @property
     def step_upgrade_versions(self) -> list[str]:
@@ -567,7 +571,7 @@ class ClusterAddon(EksResource):
     @property
     def _target_version_semver(self) -> Version:
         """Return the target version."""
-        return Version(re.sub(r"-eksbuild.*", "", self._target_version))
+        return _addon_semver(self._target_version)
 
     @property
     def within_target_minor(self) -> bool:
@@ -613,7 +617,8 @@ class ClusterAddon(EksResource):
         if (
             self.name == "vpc-cni"
             and not self.within_target_minor
-            and parse_version(self.version) < parse_version(self.next_minor)
+            and self.next_minor
+            and self.semantic_version < _addon_semver(self.next_minor)
         ):
             echo_info(
                 f"vpc-cni will target version: {self.next_minor} instead of {self._target_version} because it's not within +1 or current minor...",
@@ -624,7 +629,7 @@ class ClusterAddon(EksResource):
     @property
     def needs_upgrade(self) -> bool:
         """Determine whether or not this addon should be upgraded."""
-        return parse_version(self.version) < parse_version(self.target_version)
+        return self.semantic_version < _addon_semver(self.target_version)
 
     def wait_for_active(self, delay: int = 35, initial_delay: int = 30, max_attempts: int = 160) -> None:
         """Wait for the addon to become active."""
