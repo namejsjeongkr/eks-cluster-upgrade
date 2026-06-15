@@ -1,9 +1,13 @@
 """Test the EKS model logic."""
 
+from unittest.mock import MagicMock, patch
+
+import pytest
 from kubernetes.client.api.core_v1_api import CoreV1Api
 from kubernetes.client.api_client import ApiClient
 
-from eksupgrade.models.eks import Cluster, ClusterAddon
+from eksupgrade.exceptions import EksException
+from eksupgrade.models.eks import Cluster, ClusterAddon, ManagedNodeGroup
 
 
 def test_cluster_resource(eks_client, eks_cluster, cluster_name, region) -> None:
@@ -154,3 +158,126 @@ def test_vpc_cni_graduated_target_tolerates_eksbuild_suffix(eks_client, eks_clus
 
     # Must NOT raise InvalidVersion, and must step to next minor (11), not jump +2 to target (12).
     assert addon_resource.target_version == "v1.11.4-eksbuild.1"
+
+
+def _custom_managed_ng(eks_client, region):
+    """Build a CUSTOM amiType managed node group wired to a mocked eks client."""
+    cluster = Cluster(arn="abc", name="eks-test", version="1.32", target_version="1.33", region="ap-northeast-2")
+    cluster.eks_client = MagicMock()
+    ng = ManagedNodeGroup(
+        arn="abc",
+        cluster=cluster,
+        name="custom-ng",
+        version="1.32",
+        status="ACTIVE",
+        ami_type="CUSTOM",
+        launch_template={"id": "lt-1", "version": "1", "name": "lt-custom"},
+        region="ap-northeast-2",
+    )
+    ng.eks_client = MagicMock()
+    ng.eks_client.update_nodegroup_version.return_value = {"update": {"id": "u1", "status": "InProgress"}}
+    return ng
+
+
+def test_managed_ng_custom_resolves_ami_and_uses_concrete_lt_version(ec2_client, eks_client, region) -> None:
+    """CUSTOM managed NG: resolve AMI, create new LT version, point NG at the concrete version."""
+    ng = _custom_managed_ng(eks_client, region)
+
+    with (
+        patch("eksupgrade.models.eks.update_current_launch_template_ami", return_value=2) as mock_update_lt,
+        patch.object(ManagedNodeGroup, "_resolve_custom_target_ami", return_value="ami-new"),
+    ):
+        ng.update(wait=False)
+
+    mock_update_lt.assert_called_once_with("lt-1", "ami-new", "ap-northeast-2")
+
+    call = ng.eks_client.update_nodegroup_version.call_args
+    assert call.kwargs["launchTemplate"] == {"id": "lt-1", "version": "2"}
+    assert "version" not in call.kwargs
+    assert "releaseVersion" not in call.kwargs
+
+
+def test_managed_ng_non_custom_still_version_only(ec2_client, eks_client, region) -> None:
+    """Non-CUSTOM managed NG: version-only update, no launchTemplate."""
+    cluster = Cluster(arn="abc", name="eks-test", version="1.32", target_version="1.33", region="ap-northeast-2")
+    cluster.eks_client = MagicMock()
+    ng = ManagedNodeGroup(
+        arn="abc",
+        cluster=cluster,
+        name="al2023-ng",
+        version="1.32",
+        status="ACTIVE",
+        ami_type="AL2023_x86_64",
+        region="ap-northeast-2",
+    )
+    ng.eks_client = MagicMock()
+    ng.eks_client.update_nodegroup_version.return_value = {"update": {"id": "u1", "status": "InProgress"}}
+
+    ng.update(wait=False)
+
+    call = ng.eks_client.update_nodegroup_version.call_args
+    assert call.kwargs["version"] == "1.33"
+    assert "launchTemplate" not in call.kwargs
+
+
+def test_resolve_custom_target_ami_passes_os_hint(ec2_client, eks_client, region) -> None:
+    """_resolve_custom_target_ami must pass the OS-derived instance_type hint to get_latest_ami."""
+    ng = _custom_managed_ng(eks_client, region)
+
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_launch_template_versions.return_value = {
+        "LaunchTemplateVersions": [{"LaunchTemplateData": {"ImageId": "ami-current"}}]
+    }
+    fake_ec2.describe_images.return_value = {
+        "Images": [{"ImageLocation": "amazon/bottlerocket-aws-k8s-1.32-x86_64-v1.32.0"}]
+    }
+
+    with (
+        patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2),
+        patch("eksupgrade.models.eks.get_latest_ami", return_value="ami-new") as mock_get_ami,
+    ):
+        result = ng._resolve_custom_target_ami()
+
+    assert result == "ami-new"
+    call = mock_get_ami.call_args
+    assert "bottlerocket" in call.kwargs["instance_type"]
+    assert call.kwargs["cluster_version"] == "1.33"
+
+
+def test_resolve_custom_target_ami_raises_when_image_deregistered(ec2_client, eks_client, region) -> None:
+    """A deregistered/missing current AMI must raise a clear error, not an opaque IndexError."""
+    ng = _custom_managed_ng(eks_client, region)
+
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_launch_template_versions.return_value = {
+        "LaunchTemplateVersions": [{"LaunchTemplateData": {"ImageId": "ami-current"}}]
+    }
+    fake_ec2.describe_images.return_value = {"Images": []}
+
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        with pytest.raises(EksException) as exc_info:
+            ng._resolve_custom_target_ami()
+
+    message = str(exc_info.value)
+    assert "ami-current" in message
+    assert "deregister" in message.lower()
+
+
+def test_resolve_custom_target_ami_raises_on_unresolvable_os(ec2_client, eks_client, region) -> None:
+    """An unresolvable OS (get_latest_ami -> "NAN") must raise, not silently return the sentinel."""
+    ng = _custom_managed_ng(eks_client, region)
+
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_launch_template_versions.return_value = {
+        "LaunchTemplateVersions": [{"LaunchTemplateData": {"ImageId": "ami-current"}}]
+    }
+    fake_ec2.describe_images.return_value = {"Images": [{"ImageLocation": "amazon/some-unknown-os-image"}]}
+
+    with (
+        patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2),
+        patch("eksupgrade.models.eks.get_latest_ami", return_value="NAN"),
+    ):
+        with pytest.raises(EksException) as exc_info:
+            ng._resolve_custom_target_ami()
+
+    assert "target AMI" in str(exc_info.value)
