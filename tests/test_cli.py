@@ -108,3 +108,6 @@ def test_timing_summary_printed_on_success():
         runner.invoke(app, ["c", "1.35", "ap-northeast-2", "--no-interactive"])
     # timing summary Table printed via console.print at least once
     assert mock_print.called
+    from rich.table import Table
+
+    assert any(isinstance(call.args[0], Table) for call in mock_print.call_args_list if call.args)

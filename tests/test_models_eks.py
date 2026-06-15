@@ -332,3 +332,16 @@ def test_upgrade_nodegroups_parallel_triggers_then_waits_for_all(eks_client, reg
         ng.wait_for_active.assert_called_once()
     assert all(r.status == "completed" for r in timer.records)
     assert len(timer.records) == 2
+
+
+def test_upgrade_nodegroups_parallel_partial_failure_no_record_left_running():
+    """A mid-wait failure must close every still-open record, not leave later NGs 'running'."""
+    ngs = [_mock_ng("a"), _mock_ng("b")]
+    ngs[0].wait_for_active.side_effect = RuntimeError("a stuck")
+    cluster = _cluster_with_ngs(ngs)
+    timer = PhaseTimer()
+    with pytest.raises(RuntimeError):
+        cluster.upgrade_nodegroups(wait=False, timer=timer)
+    # No record may be left in "running" — the aborting run must close them all.
+    assert all(r.status != "running" for r in timer.records)
+    assert len(timer.records) == 2

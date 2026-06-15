@@ -896,6 +896,9 @@ class Cluster(EksResource):
             return upgrade_details
 
         records: dict[str, Any] = {}
+        # Parallel: trigger every nodegroup first, THEN wait for all — so we use
+        # manual timer.start/finish rather than the `phase` contextmanager (which
+        # would force trigger+wait per nodegroup, i.e. sequential).
         for nodegroup in nodegroups:
             if timer is not None:
                 records[nodegroup.name] = timer.start(f"nodegroup: {nodegroup.name}")
@@ -908,13 +911,18 @@ class Cluster(EksResource):
                 if timer is not None:
                     timer.finish(records[nodegroup.name], status="completed")
             except Exception:
+                # Abort: close every still-open record as failed, otherwise the
+                # already-triggered-but-not-yet-waited records stay "running"
+                # forever and corrupt the summary table.
                 if timer is not None:
-                    timer.finish(records[nodegroup.name], status="failed")
+                    for rec in records.values():
+                        if rec.end_mono is None:
+                            timer.finish(rec, status="failed")
                 raise
         return upgrade_details
 
     @staticmethod
-    def _log_nodegroup_update(nodegroup, update_response: dict[str, Any]) -> None:
+    def _log_nodegroup_update(nodegroup: "ManagedNodeGroup", update_response: dict[str, Any]) -> None:
         """Echo a managed nodegroup update's id/status line."""
         _update_id = update_response.get("id", "")
         _update_status = update_response.get("status", "")
