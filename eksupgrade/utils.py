@@ -125,7 +125,7 @@ class PhaseTimer:
 
     def summary_table(self) -> Table:
         """Build a Rich Table summarising all recorded phases."""
-        table = Table("Phase", "Start", "End", "Duration", "Status", title="Upgrade Timing")
+        table = Table("Phase", "Start", "End", "Duration", "Status", title="EKS Upgrade Timeline")
         for rec in self.records:
             start_str = time.strftime("%H:%M:%S", time.localtime(rec.start_wall))
             end_str = (
