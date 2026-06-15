@@ -16,6 +16,8 @@ from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from packaging.version import Version
 
+from eksupgrade.src.latest_ami import get_latest_ami
+from eksupgrade.src.self_managed import update_current_launch_template_ami
 from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
 
 from ..exceptions import InvalidUpgradeTargetVersion
@@ -346,6 +348,23 @@ class ManagedNodeGroup(EksResource):
             return True
         return False
 
+    def _resolve_custom_target_ami(self) -> str:
+        """Resolve the target-version AMI for this CUSTOM node group from its launch template's OS type."""
+        ec2 = boto3.client("ec2", region_name=self.cluster.region)
+        lt_id = self.launch_template["id"]
+        lt_version = str(self.launch_template["version"])
+        lt_data = ec2.describe_launch_template_versions(LaunchTemplateId=lt_id, Versions=[lt_version])
+        current_ami = lt_data["LaunchTemplateVersions"][0]["LaunchTemplateData"]["ImageId"]
+        os_type = ec2.describe_images(ImageIds=[current_ami])["Images"][0]["ImageLocation"]
+        if isinstance(os_type, str) and "Windows_Server" in os_type:
+            os_type = os_type[:46]
+        return get_latest_ami(
+            cluster_version=self.cluster.target_version,
+            instance_type=os_type,
+            image_to_search=os_type,
+            region=self.cluster.region,
+        )
+
     @requires_cluster
     def update(
         self,
@@ -359,7 +378,19 @@ class ManagedNodeGroup(EksResource):
         """Update the nodegroup to the target version."""
         update_kwargs: dict[str, Any] = {}
 
-        if not launch_template:
+        if self.ami_type == "CUSTOM" and not launch_template:
+            # AWS rejects version-only updates for CUSTOM amiType. Resolve the
+            # target AMI, create a new LT version (SourceVersion="$Latest" so
+            # KMS-encrypted block device mappings and UserData are preserved),
+            # then point the NG at that EXACT new version. Not "$Latest": both
+            # managed NGs share one launch template, so "$Latest" could bind to a
+            # version created for the other NG (race), and EKS may not accept
+            # "$Latest" for managed-NG launch templates.
+            target_ami = self._resolve_custom_target_ami()
+            lt_id = self.launch_template["id"]
+            new_lt_version = update_current_launch_template_ami(lt_id, target_ami, self.cluster.region)
+            update_kwargs["launchTemplate"] = {"id": lt_id, "version": str(new_lt_version)}
+        elif not launch_template:
             update_kwargs["version"] = version or self.cluster.target_version
         elif launch_template and not version:
             update_kwargs["launchTemplate"] = launch_template
@@ -367,7 +398,7 @@ class ManagedNodeGroup(EksResource):
             update_kwargs["launchTemplate"] = launch_template
             update_kwargs["version"] = version
         elif launch_template and (self.ami_type == "CUSTOM" and version):
-            echo_error("Version and launch template provided to managed nodegroug update with custom AMI!")
+            echo_error("Version and launch template provided to managed nodegroup update with custom AMI!")
 
         if release_version:
             update_kwargs["releaseVersion"] = release_version
