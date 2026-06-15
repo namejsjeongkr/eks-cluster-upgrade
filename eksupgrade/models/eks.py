@@ -20,7 +20,7 @@ from eksupgrade.src.latest_ami import get_latest_ami
 from eksupgrade.src.self_managed import update_current_launch_template_ami
 from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
 
-from ..exceptions import InvalidUpgradeTargetVersion
+from ..exceptions import EksException, InvalidUpgradeTargetVersion
 from .base import AwsRegionResource
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -353,17 +353,33 @@ class ManagedNodeGroup(EksResource):
         ec2 = boto3.client("ec2", region_name=self.cluster.region)
         lt_id = self.launch_template["id"]
         lt_version = str(self.launch_template["version"])
-        lt_data = ec2.describe_launch_template_versions(LaunchTemplateId=lt_id, Versions=[lt_version])
-        current_ami = lt_data["LaunchTemplateVersions"][0]["LaunchTemplateData"]["ImageId"]
-        os_type = ec2.describe_images(ImageIds=[current_ami])["Images"][0]["ImageLocation"]
+        lt_versions = ec2.describe_launch_template_versions(LaunchTemplateId=lt_id, Versions=[lt_version]).get(
+            "LaunchTemplateVersions", []
+        )
+        if not lt_versions:
+            raise EksException(f"CUSTOM nodegroup {self.name}: launch template {lt_id} version {lt_version} not found")
+        current_ami = lt_versions[0]["LaunchTemplateData"]["ImageId"]
+        images = ec2.describe_images(ImageIds=[current_ami]).get("Images", [])
+        if not images:
+            raise EksException(
+                f"CUSTOM nodegroup {self.name}: current AMI {current_ami} not found "
+                "(it may have been deregistered) — cannot determine the OS type to resolve the target AMI"
+            )
+        os_type = images[0]["ImageLocation"]
         if isinstance(os_type, str) and "Windows_Server" in os_type:
             os_type = os_type[:46]
-        return get_latest_ami(
+        target_ami = get_latest_ami(
             cluster_version=self.cluster.target_version,
             instance_type=os_type,
             image_to_search=os_type,
             region=self.cluster.region,
         )
+        if not target_ami or target_ami == "NAN":
+            raise EksException(
+                f"CUSTOM nodegroup {self.name}: could not resolve a target AMI for OS '{os_type}' "
+                f"at version {self.cluster.target_version}"
+            )
+        return target_ami
 
     @requires_cluster
     def update(

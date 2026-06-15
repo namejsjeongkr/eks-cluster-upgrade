@@ -2,9 +2,11 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from kubernetes.client.api.core_v1_api import CoreV1Api
 from kubernetes.client.api_client import ApiClient
 
+from eksupgrade.exceptions import EksException
 from eksupgrade.models.eks import Cluster, ClusterAddon, ManagedNodeGroup
 
 
@@ -240,3 +242,42 @@ def test_resolve_custom_target_ami_passes_os_hint(ec2_client, eks_client, region
     call = mock_get_ami.call_args
     assert "bottlerocket" in call.kwargs["instance_type"]
     assert call.kwargs["cluster_version"] == "1.33"
+
+
+def test_resolve_custom_target_ami_raises_when_image_deregistered(ec2_client, eks_client, region) -> None:
+    """A deregistered/missing current AMI must raise a clear error, not an opaque IndexError."""
+    ng = _custom_managed_ng(eks_client, region)
+
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_launch_template_versions.return_value = {
+        "LaunchTemplateVersions": [{"LaunchTemplateData": {"ImageId": "ami-current"}}]
+    }
+    fake_ec2.describe_images.return_value = {"Images": []}
+
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        with pytest.raises(EksException) as exc_info:
+            ng._resolve_custom_target_ami()
+
+    message = str(exc_info.value)
+    assert "ami-current" in message
+    assert "deregister" in message.lower()
+
+
+def test_resolve_custom_target_ami_raises_on_unresolvable_os(ec2_client, eks_client, region) -> None:
+    """An unresolvable OS (get_latest_ami -> "NAN") must raise, not silently return the sentinel."""
+    ng = _custom_managed_ng(eks_client, region)
+
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_launch_template_versions.return_value = {
+        "LaunchTemplateVersions": [{"LaunchTemplateData": {"ImageId": "ami-current"}}]
+    }
+    fake_ec2.describe_images.return_value = {"Images": [{"ImageLocation": "amazon/some-unknown-os-image"}]}
+
+    with (
+        patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2),
+        patch("eksupgrade.models.eks.get_latest_ami", return_value="NAN"),
+    ):
+        with pytest.raises(EksException) as exc_info:
+            ng._resolve_custom_target_ami()
+
+    assert "target AMI" in str(exc_info.value)
