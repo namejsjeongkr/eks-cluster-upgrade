@@ -392,3 +392,32 @@ def test_instance_name_map_degrades_on_error():
 
         result = _instance_name_map("ap-northeast-2", ["i-1"])
     assert result == {}
+
+
+def test_asg_get_prints_instance_table_with_names_and_colors():
+    from rich.table import Table
+
+    from eksupgrade.models.eks import AutoscalingGroup
+
+    fake_cluster = MagicMock()
+    fake_cluster.name = "c"
+    fake_cluster.region = "ap-northeast-2"
+    asg_data = {
+        "AutoScalingGroupName": "eks-asg-1",
+        "Instances": [
+            {"InstanceId": "i-1", "HealthStatus": "Healthy"},
+            {"InstanceId": "i-2", "HealthStatus": "Unhealthy"},
+        ],
+        "LaunchConfigurationName": "",
+        "LaunchTemplate": {},
+        "MixedInstancesPolicy": {},
+        "Status": "",
+    }
+    with (
+        patch("eksupgrade.models.eks._instance_name_map", return_value={"i-1": "node-a", "i-2": "node-b"}),
+        patch("eksupgrade.models.eks.console.print") as mock_print,
+    ):
+        AutoscalingGroup.get(cluster=fake_cluster, region="ap-northeast-2", asg_data=asg_data)
+    printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+    tables = [p for p in printed if isinstance(p, Table)]
+    assert tables, "expected a rich Table to be printed"
