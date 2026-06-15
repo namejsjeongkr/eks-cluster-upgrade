@@ -15,6 +15,8 @@ import boto3
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from packaging.version import Version
+from rich.console import Console
+from rich.table import Table
 
 from eksupgrade.src.latest_ami import get_latest_ami
 from eksupgrade.src.self_managed import update_current_launch_template_ami
@@ -62,6 +64,31 @@ else:
     AutoScalingGroupTypeDef = object
 
 logger = get_logger(__name__)
+console = Console()
+
+
+def _instance_name_map(region: str, instance_ids: list[str]) -> dict[str, str]:
+    """Return {instance_id: Name tag} for the given instances (read-only, degrade-safe).
+
+    One describe_instances call. On any failure or a missing Name tag the instance
+    is simply absent from the map (caller shows '-'); display-only info must never
+    abort the ASG lookup.
+    """
+    if not instance_ids:
+        return {}
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        resp = ec2.describe_instances(InstanceIds=instance_ids)
+        names: dict[str, str] = {}
+        for reservation in resp.get("Reservations", []):
+            for inst in reservation.get("Instances", []):
+                iid = inst.get("InstanceId", "")
+                name = next((t["Value"] for t in inst.get("Tags", []) if t.get("Key") == "Name"), "")
+                if iid and name:
+                    names[iid] = name
+        return names
+    except Exception:  # noqa: BLE001 - display-only; never abort the ASG lookup
+        return {}
 
 
 def _addon_semver(version: str) -> Version:
@@ -192,22 +219,21 @@ class AutoscalingGroup(AwsRegionResource):
             f"Autoscaling Group: {asg_name} - Cluster: {cluster.name}",
         )
         instances = asg_data.get("Instances", [])
-        unhealthy_instances = [
-            instance["InstanceId"] for instance in instances if instance["HealthStatus"] == "Unhealthy"
-        ]
-        healthy_instances: List[str] = [
-            instance["InstanceId"] for instance in instances if instance["HealthStatus"] == "Healthy"
-        ]
-
-        if unhealthy_instances:
-            echo_warning("Unhealthy Instances:")
-            for unhealthy_instance in unhealthy_instances:
-                echo_warning(f"\t * {unhealthy_instance}")
-
-        if healthy_instances:
-            echo_info("Healthy Instances:")
-            for healthy_instance in healthy_instances:
-                echo_info(f"\t * {healthy_instance}")
+        if instances:
+            instance_ids = [instance["InstanceId"] for instance in instances]
+            name_map = _instance_name_map(cluster.region, instance_ids)
+            instance_table = Table("Instance ID", "Name", "Health", title=f"Instances: {asg_name}")
+            for instance in instances:
+                iid = instance["InstanceId"]
+                health = instance.get("HealthStatus", "")
+                if health == "Healthy":
+                    health_cell = f"[green]{health}[/green]"
+                elif health == "Unhealthy":
+                    health_cell = f"[red]{health}[/red]"
+                else:
+                    health_cell = health
+                instance_table.add_row(iid, name_map.get(iid, "-"), health_cell)
+            console.print(instance_table)
 
         return cls(
             cluster=cluster,

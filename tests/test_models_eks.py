@@ -345,3 +345,84 @@ def test_upgrade_nodegroups_parallel_partial_failure_no_record_left_running():
     # No record may be left in "running" — the aborting run must close them all.
     assert all(r.status != "running" for r in timer.records)
     assert len(timer.records) == 2
+
+
+def test_instance_name_map_maps_names():
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_instances.return_value = {
+        "Reservations": [
+            {
+                "Instances": [
+                    {"InstanceId": "i-1", "Tags": [{"Key": "Name", "Value": "node-a"}, {"Key": "x", "Value": "y"}]},
+                    {"InstanceId": "i-2", "Tags": [{"Key": "Name", "Value": "node-b"}]},
+                ]
+            }
+        ]
+    }
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        from eksupgrade.models.eks import _instance_name_map
+
+        result = _instance_name_map("ap-northeast-2", ["i-1", "i-2"])
+    assert result == {"i-1": "node-a", "i-2": "node-b"}
+
+
+def test_instance_name_map_omits_when_no_name_tag():
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_instances.return_value = {
+        "Reservations": [{"Instances": [{"InstanceId": "i-1", "Tags": [{"Key": "env", "Value": "p"}]}]}]
+    }
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        from eksupgrade.models.eks import _instance_name_map
+
+        result = _instance_name_map("ap-northeast-2", ["i-1"])
+    assert result == {}
+
+
+def test_instance_name_map_empty_ids_skips_api():
+    from eksupgrade.models.eks import _instance_name_map
+
+    assert _instance_name_map("ap-northeast-2", []) == {}
+
+
+def test_instance_name_map_degrades_on_error():
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_instances.side_effect = RuntimeError("boom")
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        from eksupgrade.models.eks import _instance_name_map
+
+        result = _instance_name_map("ap-northeast-2", ["i-1"])
+    assert result == {}
+
+
+def test_asg_get_prints_instance_table_with_names_and_colors():
+    from rich.table import Table
+
+    from eksupgrade.models.eks import AutoscalingGroup
+
+    fake_cluster = MagicMock()
+    fake_cluster.name = "c"
+    fake_cluster.region = "ap-northeast-2"
+    asg_data = {
+        "AutoScalingGroupName": "eks-asg-1",
+        "Instances": [
+            {"InstanceId": "i-1", "HealthStatus": "Healthy"},
+            {"InstanceId": "i-2", "HealthStatus": "Unhealthy"},
+        ],
+        "LaunchConfigurationName": "",
+        "LaunchTemplate": {},
+        "MixedInstancesPolicy": {},
+        "Status": "",
+    }
+    with (
+        patch("eksupgrade.models.eks._instance_name_map", return_value={"i-1": "node-a", "i-2": "node-b"}),
+        patch("eksupgrade.models.eks.console.print") as mock_print,
+    ):
+        AutoscalingGroup.get(cluster=fake_cluster, region="ap-northeast-2", asg_data=asg_data)
+    printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+    tables = [p for p in printed if isinstance(p, Table)]
+    assert tables, "expected a rich Table to be printed"
+
+    table = tables[0]
+    health_cells = table.columns[2]._cells  # Health is the 3rd column
+    assert "[green]Healthy[/green]" in health_cells
+    assert "[red]Unhealthy[/red]" in health_cells
