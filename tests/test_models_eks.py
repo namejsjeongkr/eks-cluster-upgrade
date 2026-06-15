@@ -98,3 +98,59 @@ def test_cluster_addon_resource_update_kwargs(eks_client, eks_cluster, cluster_n
 #     assert not addon_dict["resource_id"]
 #     assert not addon_dict["tags"]
 #     assert len(addon_dict.keys()) == 17
+
+
+def test_addon_version_parsing_tolerates_eksbuild_suffix(eks_client, eks_cluster, cluster_name, region) -> None:
+    """Real EKS addon versions carry a -eksbuild.N suffix that packaging rejects unless stripped."""
+    cluster_resource = Cluster.get(cluster_name, region)
+    cluster_resource.latest_addons = False
+    addon_resource = ClusterAddon(
+        arn="abc",
+        name="coredns",
+        cluster=cluster_resource,
+        region=region,
+        owner="amazon",
+        publisher="amazon",
+        version="v1.39.0-eksbuild.1",
+    )
+    # Override the cached AWS-backed properties with realistic eksbuild-suffixed strings.
+    addon_resource.__dict__["available_versions"] = ["v1.61.1-eksbuild.1", "v1.39.0-eksbuild.1"]
+    addon_resource.__dict__["default_version"] = "v1.61.1-eksbuild.1"
+
+    # These must NOT raise packaging.version.InvalidVersion:
+    assert addon_resource.sorted_versions[0] == "v1.61.1-eksbuild.1"
+    assert addon_resource.needs_upgrade is True
+    assert addon_resource.target_version == "v1.61.1-eksbuild.1"
+
+
+def test_vpc_cni_graduated_target_tolerates_eksbuild_suffix(eks_client, eks_cluster, cluster_name, region) -> None:
+    """vpc-cni steps one minor at a time; the graduated branch parses self.next_minor,
+    which is a raw vX.Y.Z-eksbuild.N string — must be stripped before Version().
+
+    With current minor=10 and target minor=12 (two apart), within_target_minor is False,
+    so the vpc-cni graduated branch is taken and _addon_semver(self.next_minor) is called.
+    A passing assertion proves the branch ran (it would raise InvalidVersion before the fix,
+    or return the +2 target "v1.12.6-eksbuild.2" if the branch were skipped).
+    """
+    cluster_resource = Cluster.get(cluster_name, region)
+    cluster_resource.latest_addons = False
+    addon_resource = ClusterAddon(
+        arn="abc",
+        name="vpc-cni",
+        cluster=cluster_resource,
+        region=region,
+        owner="amazon",
+        publisher="amazon",
+        version="v1.10.4-eksbuild.1",
+    )
+    # Override cached AWS-backed properties with realistic eksbuild-suffixed strings.
+    # Minor spread: current=10, next=11, target=12 → within_target_minor is False → graduated branch taken.
+    addon_resource.__dict__["available_versions"] = [
+        "v1.12.6-eksbuild.2",
+        "v1.11.4-eksbuild.1",
+        "v1.10.4-eksbuild.1",
+    ]
+    addon_resource.__dict__["default_version"] = "v1.12.6-eksbuild.2"
+
+    # Must NOT raise InvalidVersion, and must step to next minor (11), not jump +2 to target (12).
+    assert addon_resource.target_version == "v1.11.4-eksbuild.1"
