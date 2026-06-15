@@ -421,3 +421,8 @@ def test_asg_get_prints_instance_table_with_names_and_colors():
     printed = [c.args[0] for c in mock_print.call_args_list if c.args]
     tables = [p for p in printed if isinstance(p, Table)]
     assert tables, "expected a rich Table to be printed"
+
+    table = tables[0]
+    health_cells = table.columns[2]._cells  # Health is the 3rd column
+    assert "[green]Healthy[/green]" in health_cells
+    assert "[red]Unhealthy[/red]" in health_cells
