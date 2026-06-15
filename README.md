@@ -1,5 +1,7 @@
 # Amazon EKS Upgrade Utility (Karpenter-aware fork)
 
+🌐 **Language**: **English** · [한국어](README.ko.md)
+
 `eksupgrade` is a CLI utility that automates the upgrade process for Amazon EKS
 clusters — the control plane, managed add-ons, and worker nodes managed by
 **Cluster Autoscaler, self-managed ASGs, and Karpenter**.
