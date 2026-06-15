@@ -85,3 +85,26 @@ def test_preflight_crash_exits_nonzero() -> None:
         result = runner.invoke(app, ["my-cluster", "1.33", "ap-northeast-2", "--preflight", "--no-interactive"])
     fake_cluster.update_cluster.assert_not_called()
     assert result.exit_code == 2
+
+
+def test_timing_summary_printed_on_success():
+    fake_cluster = MagicMock()
+    fake_cluster.version = "1.34"
+    fake_cluster.target_version = "1.35"
+    fake_cluster.available = True
+    fake_cluster.active = True
+    fake_cluster.status = "ACTIVE"
+    fake_cluster.upgradable_managed_nodegroups = []
+    fake_cluster.nodegroups = []
+    fake_cluster.nodegroup_names = []
+    fake_cluster.asg_names = []
+    with (
+        patch("eksupgrade.cli.Cluster.get", return_value=fake_cluster),
+        patch("eksupgrade.cli.is_cluster_auto_scaler_present", return_value=(False, 0, "", "")),
+        patch("eksupgrade.cli.is_karpenter_present", return_value=(False, 0, "")),
+        patch("eksupgrade.cli.handle_karpenter_drift", return_value="no_drift"),
+        patch("eksupgrade.cli.console.print") as mock_print,
+    ):
+        runner.invoke(app, ["c", "1.35", "ap-northeast-2", "--no-interactive"])
+    # timing summary Table printed via console.print at least once
+    assert mock_print.called

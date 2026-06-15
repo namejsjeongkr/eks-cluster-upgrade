@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from eksupgrade import __version__
-from eksupgrade.utils import confirm, echo_error, echo_info, echo_warning, get_logger
+from eksupgrade.utils import PhaseTimer, confirm, echo_error, echo_info, echo_warning, get_logger
 
 from .exceptions import ClusterInactiveException
 from .models.eks import Cluster
@@ -67,6 +67,7 @@ def main(
     ca_namespace: str = "kube-system"
     is_karpenter: bool = False
     karpenter_namespace: str = ""
+    timer = PhaseTimer()
 
     try:
         # Pull cluster details, populating the object for subsequent use throughout the upgrade.
@@ -110,13 +111,14 @@ def main(
         )
 
         # Checking Cluster is Active or Not Before Making an Update
-        if target_cluster.active:
-            target_cluster.update_cluster(wait=True)
-        else:
-            echo_warning(
-                f"The target EKS cluster: {target_cluster.name} isn't currently active - status: {target_cluster.status}",
-            )
-            target_cluster.wait_for_active()
+        with timer.phase("Control Plane"):
+            if target_cluster.active:
+                target_cluster.update_cluster(wait=True)
+            else:
+                echo_warning(
+                    f"The target EKS cluster: {target_cluster.name} isn't currently active - status: {target_cluster.status}",
+                )
+                target_cluster.wait_for_active()
 
         echo_info("Found the following Managed Nodegroups")
         for _mng_nodegroup_name in target_cluster.nodegroup_names:
@@ -130,7 +132,7 @@ def main(
         asg_list_self_managed = list(set(target_cluster.asg_names) - set(managed_nodegroup_asgs))
 
         # addons update
-        target_cluster.upgrade_addons(wait=True)
+        target_cluster.upgrade_addons(wait=True, timer=timer)
 
         # checking Cluster Autoscaler present and the value associated from it
         is_ca_present, ca_replicas_value, ca_name, ca_namespace = is_cluster_auto_scaler_present(
@@ -176,7 +178,7 @@ def main(
         else:
             echo_warning("No outdated managed nodegroups found!")
 
-        target_cluster.upgrade_nodegroups(wait=not parallel)
+        target_cluster.upgrade_nodegroups(wait=not parallel, timer=timer)
 
         # TODO: Use custom_ami to update launch templates and re-roll self-managed nodes under ASGs.
         echo_info("Found the following Self-managed Nodegroups:")
@@ -197,9 +199,10 @@ def main(
         # observe (and warn about pinned NodeClasses that won't auto-drift).
         if is_karpenter:
             echo_info("Handling Karpenter node upgrade via drift...")
-            drift_result = handle_karpenter_drift(
-                cluster_name=cluster_name, region=region, target_version=cluster_version
-            )
+            with timer.phase("Karpenter drift"):
+                drift_result = handle_karpenter_drift(
+                    cluster_name=cluster_name, region=region, target_version=cluster_version
+                )
             if drift_result == "settled":
                 echo_info("Karpenter drift complete — nodes are on the new version")
             elif drift_result == "timeout":
@@ -250,6 +253,11 @@ def main(
         # Karpenter is never paused (drift needs the controller running), so there
         # is nothing to re-enable here on error.
         echo_error(f"Exception encountered! Error: {error}")
+    finally:
+        # Emit the per-phase timing summary last, after any autoscaler-resume
+        # messages. Skipped when no phase ran (e.g. the preflight Exit path).
+        if timer.records:
+            console.print(timer.summary_table())
 
 
 if __name__ == "__main__":  # pragma: no cover
