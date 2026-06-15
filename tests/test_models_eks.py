@@ -345,3 +345,50 @@ def test_upgrade_nodegroups_parallel_partial_failure_no_record_left_running():
     # No record may be left in "running" — the aborting run must close them all.
     assert all(r.status != "running" for r in timer.records)
     assert len(timer.records) == 2
+
+
+def test_instance_name_map_maps_names():
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_instances.return_value = {
+        "Reservations": [
+            {
+                "Instances": [
+                    {"InstanceId": "i-1", "Tags": [{"Key": "Name", "Value": "node-a"}, {"Key": "x", "Value": "y"}]},
+                    {"InstanceId": "i-2", "Tags": [{"Key": "Name", "Value": "node-b"}]},
+                ]
+            }
+        ]
+    }
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        from eksupgrade.models.eks import _instance_name_map
+
+        result = _instance_name_map("ap-northeast-2", ["i-1", "i-2"])
+    assert result == {"i-1": "node-a", "i-2": "node-b"}
+
+
+def test_instance_name_map_omits_when_no_name_tag():
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_instances.return_value = {
+        "Reservations": [{"Instances": [{"InstanceId": "i-1", "Tags": [{"Key": "env", "Value": "p"}]}]}]
+    }
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        from eksupgrade.models.eks import _instance_name_map
+
+        result = _instance_name_map("ap-northeast-2", ["i-1"])
+    assert result == {}
+
+
+def test_instance_name_map_empty_ids_skips_api():
+    from eksupgrade.models.eks import _instance_name_map
+
+    assert _instance_name_map("ap-northeast-2", []) == {}
+
+
+def test_instance_name_map_degrades_on_error():
+    fake_ec2 = MagicMock()
+    fake_ec2.describe_instances.side_effect = RuntimeError("boom")
+    with patch("eksupgrade.models.eks.boto3.client", return_value=fake_ec2):
+        from eksupgrade.models.eks import _instance_name_map
+
+        result = _instance_name_map("ap-northeast-2", ["i-1"])
+    assert result == {}
