@@ -9,7 +9,7 @@ from typing import Any
 
 import boto3
 
-from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
+from eksupgrade.utils import echo_error, echo_info, echo_success, get_logger
 
 logger = get_logger(__name__)
 
@@ -89,56 +89,6 @@ def wait_for_ready(instanceid: str, region: str) -> bool:
         echo_error(str(e))
         raise Exception(f"{e}: Please rerun the Script the instance will be created")
     return True
-
-
-def check_asg_autoscaler(asg_name: str, region: str) -> bool:
-    """Check whether the autoscaling is present or not."""
-    asg_client = boto3.client("autoscaling", region_name=region)
-    response = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
-    pat = "k8s.io/cluster-autoscaler/enabled"
-    asg_list = []
-    for asg in response["AutoScalingGroups"][0]["Tags"]:
-        if asg["Key"] == pat:
-            asg_list.append(asg)
-    return bool(asg_list)
-
-
-def enable_disable_autoscaler(asg_name: str, action: str, region: str) -> str:
-    """Enable or disable the autoscaler depending on the provided action."""
-    asg_client = boto3.client("autoscaling", region_name=region)
-    try:
-        if action == "pause":
-            asg_client.delete_tags(
-                Tags=[
-                    {
-                        "ResourceId": asg_name,
-                        "ResourceType": "auto-scaling-group",
-                        "Key": "k8s.io/cluster-autoscaler/enabled",
-                    },
-                ]
-            )
-            return "done"
-        if action == "start":
-            asg_client.create_or_update_tags(
-                Tags=[
-                    {
-                        "ResourceId": asg_name,
-                        "ResourceType": "auto-scaling-group",
-                        "Key": "k8s.io/cluster-autoscaler/enabled",
-                        "Value": "true",
-                        "PropagateAtLaunch": False,
-                    },
-                ]
-            )
-            return "done"
-        echo_warning("Invalid action provided to enable_disable_autoscaler!")
-    except Exception as e:
-        echo_error(
-            f"Exception encountered while attempting to {action} the autoscaler associated with ASG: {asg_name} - Error: {e}",
-        )
-        raise Exception(e)
-    finally:
-        return "Something went Wrong auto scaling operation failed"
 
 
 def worker_terminate(instance_id: str, region: str) -> None:

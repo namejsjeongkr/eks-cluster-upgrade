@@ -8,13 +8,14 @@ Attributes:
 from __future__ import annotations
 
 import base64
+import os
 import queue
 import re
+import tempfile
 import threading
 import time
-from typing import Any
-
 from functools import cache
+from typing import Any
 
 import boto3
 from botocore.signers import RequestSigner
@@ -22,7 +23,7 @@ from kubernetes import client, watch
 from kubernetes.client import V1Eviction
 from kubernetes.client.rest import ApiException
 
-from eksupgrade.utils import echo_error, echo_info, get_logger
+from eksupgrade.utils import echo_error, echo_info, echo_warning, get_logger
 
 logger = get_logger(__name__)
 
@@ -81,13 +82,32 @@ def get_bearer_token(cluster_id: str, region: str) -> str:
     return "k8s-aws-v1." + re.sub(r"=*", "", base64_url)
 
 
+_CA_CERT_FILES: dict[str, str] = {}
+
+
+def _ca_cert_path(endpoint: str, ca_data_b64: str) -> str:
+    """Decode a base64 PEM cluster CA to a temp file (cached per endpoint) and return its path."""
+    cached = _CA_CERT_FILES.get(endpoint)
+    if cached and os.path.exists(cached):
+        return cached
+    _CA_CERT_FILES.pop(endpoint, None)  # discard a stale (deleted-file) entry before rewriting
+    fd, path = tempfile.mkstemp(prefix="eksupgrade-ca-", suffix=".pem")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(base64.b64decode(ca_data_b64))
+    _CA_CERT_FILES[endpoint] = path
+    return path
+
+
 def loading_config(cluster_name: str, region: str) -> str:
-    """loading kubeconfig with sts"""
+    """Configure the default kubernetes client from EKS describe-cluster (CA + STS bearer token)."""
     eks = boto3.client("eks", region_name=region)
     resp = eks.describe_cluster(name=cluster_name)
+    endpoint = resp["cluster"]["endpoint"]
+    ca_data = resp["cluster"]["certificateAuthority"]["data"]
     configs = client.Configuration()
-    configs.host = resp["cluster"]["endpoint"]
+    configs.host = endpoint
     configs.verify_ssl = True
+    configs.ssl_ca_cert = _ca_cert_path(endpoint, ca_data)
     configs.debug = False
     configs.api_key = {"authorization": "Bearer " + get_bearer_token(cluster_name, region)}
     client.Configuration.set_default(configs)
@@ -131,45 +151,187 @@ def watcher(cluster_name: str, name: str, region: str) -> bool:
         raise e
 
 
+MAX_EVICTION_RETRIES = 3
+PDB_EVICTION_TIMEOUT = 900
+PDB_RETRY_INTERVAL = 5
+
+
+def _is_daemonset_pod(pod) -> bool:
+    """Return True if the pod is owned by a DaemonSet (must not be drained)."""
+    return any(ref.kind == "DaemonSet" for ref in (pod.metadata.owner_references or []))
+
+
+def _is_mirror_pod(pod) -> bool:
+    """Return True if the pod is a static/mirror pod (cannot be evicted)."""
+    return "kubernetes.io/config.mirror" in (pod.metadata.annotations or {})
+
+
+def _is_standalone_pod(pod) -> bool:
+    """Return True if the pod has no controller owner (unmanaged)."""
+    return not (pod.metadata.owner_references or [])
+
+
+def _evict_pod(
+    cluster_name: str, node_name: str, pod, core_v1_api, region: str, pdb_timeout: int = PDB_EVICTION_TIMEOUT
+) -> None:
+    """Evict a single pod via the eviction API, retrying until the pod is gone.
+
+    kubectl-faithful semantics: a 429 means a PodDisruptionBudget is temporarily
+    blocking the eviction, so wait and retry (bounded by pdb_timeout) instead of
+    failing the whole drain; a 404 means the pod is already gone, which IS success
+    (also covers the retry after the watcher missed a fast DELETED event).
+    """
+    eviction_body = V1Eviction(metadata=client.V1ObjectMeta(name=pod.metadata.name, namespace=pod.metadata.namespace))
+    deadline = time.monotonic() + pdb_timeout
+    watch_misses = 0
+    while watch_misses < MAX_EVICTION_RETRIES:
+        try:
+            core_v1_api.create_namespaced_pod_eviction(
+                name=pod.metadata.name, namespace=pod.metadata.namespace, body=eviction_body
+            )
+        except ApiException as api_error:
+            if api_error.status == 404:
+                return
+            if api_error.status == 429:
+                if time.monotonic() >= deadline:
+                    echo_error(
+                        f"PodDisruptionBudget kept blocking eviction of pod: {pod.metadata.name} "
+                        f"for {pdb_timeout}s - node: {node_name} - cluster: {cluster_name}",
+                    )
+                    raise Exception(
+                        f"Eviction of pod {pod.metadata.name} blocked by a PodDisruptionBudget past {pdb_timeout}s"
+                    ) from api_error
+                echo_info(
+                    f"Eviction of pod: {pod.metadata.name} is blocked by a PodDisruptionBudget; "
+                    f"retrying in {PDB_RETRY_INTERVAL}s..."
+                )
+                time.sleep(PDB_RETRY_INTERVAL)
+                continue
+            raise
+        if watcher(cluster_name, pod.metadata.name, region):
+            return
+        watch_misses += 1
+    echo_error(
+        f"Unable to evict pod: {pod.metadata.name} from node: {node_name} in cluster: {cluster_name}",
+    )
+    raise Exception(f"Error: Unable to delete pod {pod.metadata.name} from node {node_name}")
+
+
 def drain_nodes(cluster_name, node_name, forced, region) -> str | None:
-    """Pod eviction using the eviction API."""
+    """Drain ALL pods from a node via the eviction API (or force-delete if forced)."""
     loading_config(cluster_name, region)
     core_v1_api = client.CoreV1Api()
     api_response = core_v1_api.list_pod_for_all_namespaces(watch=False, field_selector=f"spec.nodeName={node_name}")
-    retry = 0
 
     if not api_response.items:
         return f"Empty Nothing to Drain {node_name}"
 
-    for i in api_response.items:
-        if i.spec.node_name == node_name:
-            try:
-                if forced:
-                    core_v1_api.delete_namespaced_pod(
-                        i.metadata.name, i.metadata.namespace, grace_period_seconds=0, body=client.V1DeleteOptions()
-                    )
-                else:
-                    eviction_body = V1Eviction(
-                        metadata=client.V1ObjectMeta(name=i.metadata.name, namespace=i.metadata.namespace)
-                    )
-                    core_v1_api.create_namespaced_pod_eviction(
-                        name=i.metadata.name, namespace=i.metadata.namespace, body=eviction_body
-                    )
-                    # retry to if pod is not deleted with eviction api
-                    if not watcher(cluster_name, i.metadata.name, region) and retry < 2:
-                        drain_nodes(cluster_name, node_name, forced=forced, region=region)
-                        retry += 1
-                    if retry == 2:
-                        echo_error(
-                            f"Exception encountered - unable to delete the pod: {i.metadata.name} from node: {node_name} in cluster: {cluster_name}",
-                        )
-                        raise Exception(f"Error: Unable to delete pod {i.metadata.name} from node {node_name}")
-                    return None
-            except Exception as e:
-                echo_error(
-                    f"Exception encountered while attempting to drain nodes! Node: {node_name} Cluster: {cluster_name} - Error: {e}",
+    # DaemonSet and mirror (static) pods are node-managed and must not be drained.
+    drainable = [
+        pod
+        for pod in api_response.items
+        if pod.spec.node_name == node_name and not _is_daemonset_pod(pod) and not _is_mirror_pod(pod)
+    ]
+
+    # Pre-validate before evicting anything: an unmanaged pod without --force aborts
+    # the whole drain so the node is never left half-drained (kubectl-faithful).
+    if not forced:
+        orphans = [pod.metadata.name for pod in drainable if _is_standalone_pod(pod)]
+        if orphans:
+            echo_error(
+                f"Node {node_name} has unmanaged pod(s) {orphans} that would be lost. Re-run with --force.",
+            )
+            raise Exception(f"Unmanaged pod(s) {orphans} on node {node_name} require --force to drain")
+
+    for pod in drainable:
+        try:
+            if forced:
+                core_v1_api.delete_namespaced_pod(
+                    pod.metadata.name, pod.metadata.namespace, grace_period_seconds=0, body=client.V1DeleteOptions()
                 )
-                raise Exception("Unable to Delete the Node")
+            else:
+                _evict_pod(cluster_name, node_name, pod, core_v1_api, region)
+        except Exception as e:
+            echo_error(
+                f"Exception encountered while attempting to drain nodes! Node: {node_name} Cluster: {cluster_name} - Error: {e}",
+            )
+            raise Exception("Unable to Delete the Node")
+    return None
+
+
+def _is_statefulset_pod(pod) -> bool:
+    """Return True if the pod is owned by a StatefulSet."""
+    return any(ref.kind == "StatefulSet" for ref in (pod.metadata.owner_references or []))
+
+
+def get_statefulset_pods_on_node(cluster_name: str, node_name: str, region: str) -> list[tuple[str, str]]:
+    """Return (name, namespace) of StatefulSet pods on the node.
+
+    Must be called BEFORE draining the node — draining removes the pods, after
+    which they can no longer be identified. The returned identities are used to
+    confirm the pods come back Ready (and thus rebind their PVCs) elsewhere.
+    """
+    loading_config(cluster_name, region)
+    core_v1_api = client.CoreV1Api()
+    api_response = core_v1_api.list_pod_for_all_namespaces(watch=False, field_selector=f"spec.nodeName={node_name}")
+    return [
+        (pod.metadata.name, pod.metadata.namespace)
+        for pod in api_response.items
+        if pod.spec.node_name == node_name and _is_statefulset_pod(pod)
+    ]
+
+
+def _pod_running_and_ready(pod) -> bool:
+    """Return True if the pod is Running and has a Ready=True condition."""
+    if pod.status.phase != "Running":
+        return False
+    return any(c.type == "Ready" and c.status == "True" for c in (pod.status.conditions or []))
+
+
+def wait_for_statefulset_pods_ready(
+    cluster_name: str,
+    region: str,
+    pods: list[tuple[str, str]],
+    timeout: int = 600,
+    poll_interval: int = 15,
+) -> bool:
+    """Wait, with a bound, for the given StatefulSet pods to be Running and Ready.
+
+    A StatefulSet pod cannot reach Ready until its volume mounts, so pod-Ready is
+    the PVC-rebind confirmation. Returns immediately if there are no pods. Never
+    forces anything — on timeout it reports and returns False.
+    """
+    if not pods:
+        return True
+
+    loading_config(cluster_name, region)
+    core_v1_api = client.CoreV1Api()
+    deadline = time.monotonic() + timeout
+
+    while True:
+        not_ready: list[str] = []
+        for name, namespace in pods:
+            try:
+                pod = core_v1_api.read_namespaced_pod(name=name, namespace=namespace)
+                if not _pod_running_and_ready(pod):
+                    not_ready.append(name)
+            except ApiException:
+                # Pod not recreated yet (e.g. 404 during reschedule).
+                not_ready.append(name)
+
+        if not not_ready:
+            echo_info("All StatefulSet pods are Running and Ready on their replacement nodes.")
+            return True
+
+        if time.monotonic() >= deadline:
+            echo_warning(
+                f"Timed out waiting for StatefulSet pods to become Ready: {not_ready}. "
+                f"Check their PVCs / scheduling before continuing.",
+            )
+            return False
+
+        echo_info(f"Waiting for StatefulSet pods to become Ready: {not_ready}")
+        time.sleep(poll_interval)
 
 
 def delete_node(cluster_name: str, node_name: str, region: str) -> None:
@@ -337,19 +499,41 @@ def get_default_version(addon: str, version: str, region: str) -> str:
     )
 
 
-def is_cluster_auto_scaler_present(cluster_name: str, region: str) -> list[bool | int]:
-    """Determine whether or not cluster autoscaler is present."""
+def _is_cluster_autoscaler_deployment(deployment) -> bool:
+    """Match the Cluster Autoscaler by exact name or by its well-known label.
+
+    Helm installs commonly name it ``<release>-aws-cluster-autoscaler``, so the
+    exact-name check alone misses those; the label is stable across installs.
+    """
+    if deployment.metadata.name == "cluster-autoscaler":
+        return True
+    labels = deployment.metadata.labels or {}
+    return labels.get("app.kubernetes.io/name") in ("aws-cluster-autoscaler", "cluster-autoscaler")
+
+
+def is_cluster_auto_scaler_present(cluster_name: str, region: str) -> tuple[bool, int, str, str]:
+    """Determine whether the Cluster Autoscaler deployment is present.
+
+    Returns (is_present, replicas_count, name, namespace).
+    """
     loading_config(cluster_name, region)
     apps_v1_api = client.AppsV1Api()
     res = apps_v1_api.list_deployment_for_all_namespaces()
     for res_i in res.items:
-        if res_i.metadata.name == "cluster-autoscaler":
-            return [True, res_i.spec.replicas]
-    return [False, 0]
+        if _is_cluster_autoscaler_deployment(res_i):
+            return (True, res_i.spec.replicas, res_i.metadata.name, res_i.metadata.namespace)
+    return (False, 0, "", "")
 
 
-def cluster_auto_enable_disable(cluster_name: str, operation: str, mx_val: int, region: str) -> None:
-    """Enable or disable deployment in cluster."""
+def cluster_auto_enable_disable(
+    cluster_name: str,
+    operation: str,
+    mx_val: int,
+    region: str,
+    name: str = "cluster-autoscaler",
+    namespace: str = "kube-system",
+) -> None:
+    """Pause (replicas=0) or start (replicas=mx_val) the Cluster Autoscaler deployment."""
     loading_config(cluster_name, region)
     api = client.AppsV1Api()
     if operation == "pause":
@@ -361,7 +545,7 @@ def cluster_auto_enable_disable(cluster_name: str, operation: str, mx_val: int, 
         raise NotImplementedError("Operation must be either pause or start!")
 
     try:
-        api.patch_namespaced_deployment(name="cluster-autoscaler", namespace="kube-system", body=body)
+        api.patch_namespaced_deployment(name=name, namespace=namespace, body=body)
     except Exception as e:
         echo_error(f"Exception encountered while running auto enable disable - Error: {e}")
         raise e
@@ -371,7 +555,7 @@ def is_karpenter_present(cluster_name: str, region: str) -> tuple[bool, int, str
     """Determine whether or not Karpenter is present.
 
     Karpenter can be deployed in either 'karpenter' or 'kube-system' namespace.
-    Returns (is_present, replicas_count, namespace) similar to cluster autoscaler.
+    Returns (is_present, replicas_count, namespace).
     """
     loading_config(cluster_name, region)
     apps_v1_api = client.AppsV1Api()
@@ -395,171 +579,8 @@ def is_karpenter_present(cluster_name: str, region: str) -> tuple[bool, int, str
     return (False, 0, "")
 
 
-def karpenter_enable_disable(cluster_name: str, operation: str, mx_val: int, region: str, namespace: str = "karpenter") -> None:
-    """Enable or disable Karpenter deployment in cluster.
-
-    Args:
-        cluster_name: The name of the EKS cluster
-        operation: Either 'pause' or 'start'
-        mx_val: The number of replicas to restore when starting
-        region: AWS region
-        namespace: Namespace where Karpenter is deployed (default: 'karpenter')
-    """
-    loading_config(cluster_name, region)
-    api = client.AppsV1Api()
-
-    if operation == "pause":
-        body = {"spec": {"replicas": 0}}
-    elif operation == "start":
-        body = {"spec": {"replicas": mx_val}}
-    else:
-        echo_error("Operation must be either pause or start for Karpenter!")
-        raise NotImplementedError("Operation must be either pause or start!")
-
-    try:
-        api.patch_namespaced_deployment(name="karpenter", namespace=namespace, body=body)
-        echo_info(f"Karpenter {'paused' if operation == 'pause' else 'enabled'} in namespace: {namespace}")
-    except Exception as e:
-        echo_error(f"Exception encountered while controlling Karpenter - Error: {e}")
-        raise e
-
-
-def get_karpenter_nodes(cluster_name: str, region: str) -> list[str]:
-    """Get list of nodes managed by Karpenter.
-
-    Karpenter nodes are identified by the following labels:
-    - v1.x (NodePool): karpenter.sh/nodepool
-    - v0.x (Provisioner): karpenter.sh/provisioner-name
-
-    Returns:
-        List of node names managed by Karpenter
-    """
-    loading_config(cluster_name, region)
-    core_v1_api = client.CoreV1Api()
-    karpenter_nodes: list[str] = []
-
-    try:
-        nodes = core_v1_api.list_node()
-
-        for node in nodes.items:
-            labels = node.metadata.labels
-            # Check for both v1.x (NodePool) and v0.x (Provisioner) labels
-            if "karpenter.sh/nodepool" in labels or "karpenter.sh/provisioner-name" in labels:
-                karpenter_nodes.append(node.metadata.name)
-                nodepool_or_provisioner = labels.get("karpenter.sh/nodepool") or labels.get("karpenter.sh/provisioner-name")
-                echo_info(f"Found Karpenter node: {node.metadata.name} (managed by: {nodepool_or_provisioner})")
-
-    except Exception as e:
-        echo_error(f"Exception encountered while getting Karpenter nodes - Error: {e}")
-        raise e
-
-    return karpenter_nodes
-
-
-def upgrade_karpenter_nodes(cluster_name: str, region: str, forced: bool = False) -> None:
-    """Upgrade Karpenter-managed nodes by draining and terminating them.
-
-    After the EKS control plane is upgraded, Karpenter-managed nodes need to be
-    drained and their underlying EC2 instances terminated so that when Karpenter
-    is re-enabled it provisions new nodes with the updated AMI.
-
-    Args:
-        cluster_name: The name of the EKS cluster
-        region: AWS region
-        forced: If True, force pod eviction ignoring PodDisruptionBudgets
-    """
-    karpenter_nodes = get_karpenter_nodes(cluster_name, region)
-
-    if not karpenter_nodes:
-        echo_info("No Karpenter nodes found to upgrade")
-        return
-
-    echo_info(f"Found {len(karpenter_nodes)} Karpenter node(s) to upgrade")
-
-    loading_config(cluster_name, region)
-    core_v1_api = client.CoreV1Api()
-    ec2_client = boto3.client("ec2", region_name=region)
-
-    for node_name in karpenter_nodes:
-        echo_info(f"Upgrading Karpenter node: {node_name}")
-
-        # Extract EC2 instance ID from node's provider ID (format: aws:///az/i-xxxxx)
-        try:
-            node = core_v1_api.read_node(node_name)
-            provider_id = node.spec.provider_id
-            instance_id = provider_id.split("/")[-1]
-            echo_info(f"Node {node_name} maps to EC2 instance: {instance_id}")
-        except Exception as e:
-            echo_error(f"Failed to get instance ID for node {node_name}: {e}")
-            raise e
-
-        # Cordon the node to prevent new pods from being scheduled
-        echo_info(f"Cordoning Karpenter node: {node_name}")
-        unschedule_old_nodes(cluster_name=cluster_name, node_name=node_name, region=region)
-
-        # Drain the node (evict all non-daemonset pods)
-        echo_info(f"Draining Karpenter node: {node_name}")
-        drain_nodes(cluster_name=cluster_name, node_name=node_name, forced=forced, region=region)
-
-        # Terminate the underlying EC2 instance.
-        # Karpenter's NodeClaim will detect the instance termination and clean up.
-        # When Karpenter is re-enabled, it will provision new nodes with the updated AMI.
-        echo_info(f"Terminating EC2 instance {instance_id} for Karpenter node: {node_name}")
-        try:
-            ec2_client.terminate_instances(InstanceIds=[instance_id])
-            echo_info(f"Successfully terminated EC2 instance: {instance_id}")
-        except Exception as e:
-            echo_error(f"Failed to terminate EC2 instance {instance_id} for node {node_name}: {e}")
-            raise e
-
-
-def get_karpenter_nodepools(cluster_name: str, region: str) -> dict[str, list[str]]:
-    """Get list of Karpenter NodePools and Provisioners (legacy).
-
-    Returns a dictionary with:
-    - 'nodepools': List of NodePool names (v1.x)
-    - 'provisioners': List of Provisioner names (v0.x, deprecated)
-    """
-    loading_config(cluster_name, region)
-    custom_objects_api = client.CustomObjectsApi()
-
-    result: dict[str, list[str]] = {
-        "nodepools": [],
-        "provisioners": []
-    }
-
-    # Try to get NodePools (v1.x)
-    try:
-        nodepools = custom_objects_api.list_cluster_custom_object(
-            group="karpenter.sh",
-            version="v1",
-            plural="nodepools"
-        )
-        for item in nodepools.get("items", []):
-            nodepool_name = item["metadata"]["name"]
-            result["nodepools"].append(nodepool_name)
-            echo_info(f"Found NodePool: {nodepool_name}")
-    except ApiException as e:
-        if e.status == 404:
-            echo_info("No v1 NodePools found (this is normal for Karpenter v0.x)")
-        else:
-            echo_error(f"Error fetching NodePools: {e}")
-
-    # Try to get Provisioners (v0.x, legacy)
-    try:
-        provisioners = custom_objects_api.list_cluster_custom_object(
-            group="karpenter.sh",
-            version="v1alpha5",
-            plural="provisioners"
-        )
-        for item in provisioners.get("items", []):
-            provisioner_name = item["metadata"]["name"]
-            result["provisioners"].append(provisioner_name)
-            echo_info(f"Found Provisioner (legacy): {provisioner_name}")
-    except ApiException as e:
-        if e.status == 404:
-            echo_info("No v1alpha5 Provisioners found (this is normal for Karpenter v1.x)")
-        else:
-            echo_error(f"Error fetching Provisioners: {e}")
-
-    return result
+# NOTE: Karpenter node upgrades are handled by the drift-based flow in
+# eksupgrade/src/karpenter.py (handle_karpenter_drift). The old approach of
+# pausing the controller and terminating EC2 instances was removed: it caused a
+# capacity gap, bypassed PodDisruptionBudgets / disruption budgets, and never
+# updated the AMI. Karpenter's native Drift replaces nodes capacity-first.

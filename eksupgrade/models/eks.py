@@ -9,17 +9,20 @@ import time
 from abc import ABC
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from packaging.version import Version
-from packaging.version import parse as parse_version
+from rich.console import Console
+from rich.table import Table
 
-from eksupgrade.utils import echo_error, echo_info, echo_success, echo_warning, get_logger
+from eksupgrade.src.latest_ami import get_latest_ami
+from eksupgrade.src.self_managed import update_current_launch_template_ami
+from eksupgrade.utils import PhaseTimer, echo_error, echo_info, echo_success, echo_warning, get_logger
 
-from ..exceptions import InvalidUpgradeTargetVersion
+from ..exceptions import EksException, InvalidUpgradeTargetVersion
 from .base import AwsRegionResource
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -60,9 +63,49 @@ else:
     AutoScalingGroupsTypeTypeDef = object
     AutoScalingGroupTypeDef = object
 
-from eksupgrade.utils import get_logger
-
 logger = get_logger(__name__)
+console = Console()
+
+
+def _instance_name_map(region: str, instance_ids: list[str]) -> dict[str, str]:
+    """Return {instance_id: Name tag} for the given instances (read-only, degrade-safe).
+
+    One describe_instances call. On any failure or a missing Name tag the instance
+    is simply absent from the map (caller shows '-'); display-only info must never
+    abort the ASG lookup.
+    """
+    if not instance_ids:
+        return {}
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        resp = ec2.describe_instances(InstanceIds=instance_ids)
+        names: dict[str, str] = {}
+        for reservation in resp.get("Reservations", []):
+            for inst in reservation.get("Instances", []):
+                iid = inst.get("InstanceId", "")
+                name = next((t["Value"] for t in inst.get("Tags", []) if t.get("Key") == "Name"), "")
+                if iid and name:
+                    names[iid] = name
+        return names
+    except Exception:  # noqa: BLE001 - display-only; never abort the ASG lookup
+        return {}
+
+
+def _addon_semver(version: str) -> Version:
+    """Parse an EKS addon version, stripping the ``-eksbuild.N`` suffix packaging rejects."""
+    return Version(re.sub(r"-eksbuild.*", "", version))
+
+
+def _default_next_minor(version: str) -> str:
+    """Return the next minor version string (e.g. '1.29' -> '1.30').
+
+    Used as the default upgrade target when none is supplied. Increments the
+    minor as an integer — unlike the old float-based math, which broke at every
+    X.9 -> X.10 boundary (e.g. '1.29' -> '1.3', '1.9' -> '1.91').
+    """
+    parsed = Version(version)
+    return f"{parsed.major}.{parsed.minor + 1}"
+
 
 TOKEN_PREFIX: str = "k8s-aws-v1"
 TOKEN_HEADER_KEY: str = "x-k8s-aws-id"
@@ -176,22 +219,21 @@ class AutoscalingGroup(AwsRegionResource):
             f"Autoscaling Group: {asg_name} - Cluster: {cluster.name}",
         )
         instances = asg_data.get("Instances", [])
-        unhealthy_instances = [
-            instance["InstanceId"] for instance in instances if instance["HealthStatus"] == "Unhealthy"
-        ]
-        healthy_instances: List[str] = [
-            instance["InstanceId"] for instance in instances if instance["HealthStatus"] == "Healthy"
-        ]
-
-        if unhealthy_instances:
-            echo_warning("Unhealthy Instances:")
-            for unhealthy_instance in unhealthy_instances:
-                echo_warning(f"\t * {unhealthy_instance}")
-
-        if healthy_instances:
-            echo_info("Healthy Instances:")
-            for healthy_instance in healthy_instances:
-                echo_info(f"\t * {healthy_instance}")
+        if instances:
+            instance_ids = [instance["InstanceId"] for instance in instances]
+            name_map = _instance_name_map(cluster.region, instance_ids)
+            instance_table = Table("Instance ID", "Name", "Health", title=f"Instances: {asg_name}")
+            for instance in instances:
+                iid = instance["InstanceId"]
+                health = instance.get("HealthStatus", "")
+                if health == "Healthy":
+                    health_cell = f"[green]{health}[/green]"
+                elif health == "Unhealthy":
+                    health_cell = f"[red]{health}[/red]"
+                else:
+                    health_cell = health
+                instance_table.add_row(iid, name_map.get(iid, "-"), health_cell)
+            console.print(instance_table)
 
         return cls(
             cluster=cluster,
@@ -332,6 +374,39 @@ class ManagedNodeGroup(EksResource):
             return True
         return False
 
+    def _resolve_custom_target_ami(self) -> str:
+        """Resolve the target-version AMI for this CUSTOM node group from its launch template's OS type."""
+        ec2 = boto3.client("ec2", region_name=self.cluster.region)
+        lt_id = self.launch_template["id"]
+        lt_version = str(self.launch_template["version"])
+        lt_versions = ec2.describe_launch_template_versions(LaunchTemplateId=lt_id, Versions=[lt_version]).get(
+            "LaunchTemplateVersions", []
+        )
+        if not lt_versions:
+            raise EksException(f"CUSTOM nodegroup {self.name}: launch template {lt_id} version {lt_version} not found")
+        current_ami = lt_versions[0]["LaunchTemplateData"]["ImageId"]
+        images = ec2.describe_images(ImageIds=[current_ami]).get("Images", [])
+        if not images:
+            raise EksException(
+                f"CUSTOM nodegroup {self.name}: current AMI {current_ami} not found "
+                "(it may have been deregistered) — cannot determine the OS type to resolve the target AMI"
+            )
+        os_type = images[0]["ImageLocation"]
+        if isinstance(os_type, str) and "Windows_Server" in os_type:
+            os_type = os_type[:46]
+        target_ami = get_latest_ami(
+            cluster_version=self.cluster.target_version,
+            instance_type=os_type,
+            image_to_search=os_type,
+            region=self.cluster.region,
+        )
+        if not target_ami or target_ami == "NAN":
+            raise EksException(
+                f"CUSTOM nodegroup {self.name}: could not resolve a target AMI for OS '{os_type}' "
+                f"at version {self.cluster.target_version}"
+            )
+        return target_ami
+
     @requires_cluster
     def update(
         self,
@@ -345,7 +420,19 @@ class ManagedNodeGroup(EksResource):
         """Update the nodegroup to the target version."""
         update_kwargs: dict[str, Any] = {}
 
-        if not launch_template:
+        if self.ami_type == "CUSTOM" and not launch_template:
+            # AWS rejects version-only updates for CUSTOM amiType. Resolve the
+            # target AMI, create a new LT version (SourceVersion="$Latest" so
+            # KMS-encrypted block device mappings and UserData are preserved),
+            # then point the NG at that EXACT new version. Not "$Latest": both
+            # managed NGs share one launch template, so "$Latest" could bind to a
+            # version created for the other NG (race), and EKS may not accept
+            # "$Latest" for managed-NG launch templates.
+            target_ami = self._resolve_custom_target_ami()
+            lt_id = self.launch_template["id"]
+            new_lt_version = update_current_launch_template_ami(lt_id, target_ami, self.cluster.region)
+            update_kwargs["launchTemplate"] = {"id": lt_id, "version": str(new_lt_version)}
+        elif not launch_template:
             update_kwargs["version"] = version or self.cluster.target_version
         elif launch_template and not version:
             update_kwargs["launchTemplate"] = launch_template
@@ -353,7 +440,7 @@ class ManagedNodeGroup(EksResource):
             update_kwargs["launchTemplate"] = launch_template
             update_kwargs["version"] = version
         elif launch_template and (self.ami_type == "CUSTOM" and version):
-            echo_error("Version and launch template provided to managed nodegroug update with custom AMI!")
+            echo_error("Version and launch template provided to managed nodegroup update with custom AMI!")
 
         if release_version:
             update_kwargs["releaseVersion"] = release_version
@@ -525,18 +612,18 @@ class ClusterAddon(EksResource):
 
     @cached_property
     def sorted_versions(self) -> list[str]:
-        """Return the latest version."""
-        return sorted(self.available_versions, reverse=True, key=parse_version)
+        """Return available versions sorted latest-first (EKS eksbuild suffix tolerated)."""
+        return sorted(self.available_versions, reverse=True, key=_addon_semver)
 
     @cached_property
     def semantic_version(self) -> Version:
         """Return the current version without eks platform details in the string."""
-        return Version(re.sub(r"-eksbuild.*", "", self.version))
+        return _addon_semver(self.version)
 
     @property
     def semantic_versions(self) -> list[Version]:
         """Return the list of semantic versions sorted with latest first."""
-        return [Version(re.sub(r"-eksbuild.*", "", version)) for version in self.sorted_versions]
+        return [_addon_semver(version) for version in self.sorted_versions]
 
     @property
     def step_upgrade_versions(self) -> list[str]:
@@ -557,7 +644,7 @@ class ClusterAddon(EksResource):
     @property
     def _target_version_semver(self) -> Version:
         """Return the target version."""
-        return Version(re.sub(r"-eksbuild.*", "", self._target_version))
+        return _addon_semver(self._target_version)
 
     @property
     def within_target_minor(self) -> bool:
@@ -603,7 +690,8 @@ class ClusterAddon(EksResource):
         if (
             self.name == "vpc-cni"
             and not self.within_target_minor
-            and parse_version(self.version) < parse_version(self.next_minor)
+            and self.next_minor
+            and self.semantic_version < _addon_semver(self.next_minor)
         ):
             echo_info(
                 f"vpc-cni will target version: {self.next_minor} instead of {self._target_version} because it's not within +1 or current minor...",
@@ -614,7 +702,7 @@ class ClusterAddon(EksResource):
     @property
     def needs_upgrade(self) -> bool:
         """Determine whether or not this addon should be upgraded."""
-        return parse_version(self.version) < parse_version(self.target_version)
+        return self.semantic_version < _addon_semver(self.target_version)
 
     def wait_for_active(self, delay: int = 35, initial_delay: int = 30, max_attempts: int = 160) -> None:
         """Wait for the addon to become active."""
@@ -661,7 +749,7 @@ class Cluster(EksResource):
         """Perform the post initialization steps."""
         self._register_k8s_aws_id_handlers()
         self.load_config()
-        self.target_version = self.target_version or str(float(self.version) + 0.01)
+        self.target_version = self.target_version or _default_next_minor(self.version)
         self.active_waiter = self.eks_client.get_waiter("cluster_active")
 
     def _register_k8s_aws_id_handlers(self) -> None:
@@ -775,8 +863,11 @@ class Cluster(EksResource):
             return None
 
         if self._target_version_object.minor > self._version_object.minor + 1:
+            next_hop = _default_next_minor(self.version)
             echo_error(
-                f"Cluster: {self.name} can't be upgraded more than one minor at a time! Please adjust the target cluster version and try again!",
+                f"Cluster: {self.name} can't be upgraded more than one minor at a time "
+                f"({self.version} -> {self.target_version}). EKS only allows sequential minor "
+                f"upgrades — run eksupgrade once per minor, starting with target {next_hop}.",
             )
             raise InvalidUpgradeTargetVersion()
 
@@ -796,25 +887,72 @@ class Cluster(EksResource):
             self.wait_for_active()
         return update_response_body
 
-    def upgrade_addons(self, wait: bool = False) -> dict[str, Any]:
+    def upgrade_addons(self, wait: bool = False, timer: PhaseTimer | None = None) -> dict[str, Any]:
         """Upgrade all cluster addons."""
         echo_info("The add-ons update has been initiated...")
         upgrade_details: dict[str, Any] = {}
         for addon in self.upgradable_addons:
-            _update_responses: list[UpdateTypeDef] = addon.update(wait=wait)
-            upgrade_details[addon.name] = _update_responses
+            if timer is not None:
+                with timer.phase(f"addon: {addon.name}"):
+                    upgrade_details[addon.name] = addon.update(wait=wait)
+            else:
+                upgrade_details[addon.name] = addon.update(wait=wait)
         return upgrade_details
 
-    def upgrade_nodegroups(self, wait: bool = False) -> dict[str, Any]:
-        """Upgrade all EKS managed nodegroups."""
+    def upgrade_nodegroups(self, wait: bool = False, timer: PhaseTimer | None = None) -> dict[str, Any]:
+        """Upgrade all EKS managed nodegroups.
+
+        Sequential (wait=True): each nodegroup is updated and waited on in turn.
+        Parallel (wait=False): all nodegroups are TRIGGERED first, then we wait for
+        every one to become Active before returning — so the caller never reports
+        completion while a node roll is still InProgress.
+        """
         upgrade_details: dict[str, Any] = {}
-        for nodegroup in self.upgradable_managed_nodegroups:
-            _update_response: UpdateTypeDef = nodegroup.update(wait=wait)
-            _update_id: str = _update_response.get("id", "")
-            _update_status: str = _update_response.get("status", "")
-            echo_info(f"Updating nodegroup: {nodegroup.name} - ID: {_update_id} - Status: {_update_status}")
+        nodegroups = self.upgradable_managed_nodegroups
+
+        if wait:
+            for nodegroup in nodegroups:
+                if timer is not None:
+                    with timer.phase(f"nodegroup: {nodegroup.name}"):
+                        _update_response = nodegroup.update(wait=True)
+                else:
+                    _update_response = nodegroup.update(wait=True)
+                self._log_nodegroup_update(nodegroup, _update_response)
+                upgrade_details[nodegroup.name] = _update_response
+            return upgrade_details
+
+        records: dict[str, Any] = {}
+        # Parallel: trigger every nodegroup first, THEN wait for all — so we use
+        # manual timer.start/finish rather than the `phase` contextmanager (which
+        # would force trigger+wait per nodegroup, i.e. sequential).
+        for nodegroup in nodegroups:
+            if timer is not None:
+                records[nodegroup.name] = timer.start(f"nodegroup: {nodegroup.name}")
+            _update_response = nodegroup.update(wait=False)
+            self._log_nodegroup_update(nodegroup, _update_response)
             upgrade_details[nodegroup.name] = _update_response
+        for nodegroup in nodegroups:
+            try:
+                nodegroup.wait_for_active()
+                if timer is not None:
+                    timer.finish(records[nodegroup.name], status="completed")
+            except Exception:
+                # Abort: close every still-open record as failed, otherwise the
+                # already-triggered-but-not-yet-waited records stay "running"
+                # forever and corrupt the summary table.
+                if timer is not None:
+                    for rec in records.values():
+                        if rec.end_mono is None:
+                            timer.finish(rec, status="failed")
+                raise
         return upgrade_details
+
+    @staticmethod
+    def _log_nodegroup_update(nodegroup: "ManagedNodeGroup", update_response: dict[str, Any]) -> None:
+        """Echo a managed nodegroup update's id/status line."""
+        _update_id = update_response.get("id", "")
+        _update_status = update_response.get("status", "")
+        echo_info(f"Updating nodegroup: {nodegroup.name} - ID: {_update_id} - Status: {_update_status}")
 
     def get_token(self) -> str:
         """Generate a presigned url token to pass to client.

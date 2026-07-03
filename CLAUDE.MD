@@ -657,9 +657,13 @@ git push origin v0.9.0
 - API rate limits: boto3 automatic retry with exponential backoff
 
 ### Kubernetes Version Support
-- Tool supports Kubernetes 1.20-1.30 (as of v0.9.0)
-- AWS EKS supported versions change quarterly
-- Version mappings in S3Files/ need updates for new releases
+- Only sequential single-minor upgrades are allowed (e.g. 1.34 -> 1.35); a
+  multi-minor target raises InvalidUpgradeTargetVersion with guidance to run
+  once per minor.
+- AWS EKS supported versions change quarterly (standard support ~1.33-1.36 as of
+  mid-2026). Add-on versions are resolved live via describe_addon_versions, so
+  there is no static version table to maintain (the old S3Files/version_dict.json
+  was removed).
 
 ### Add-on Version Mappings
 - Located in `src/S3Files/*.json`

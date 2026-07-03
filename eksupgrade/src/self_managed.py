@@ -64,16 +64,23 @@ def lt_id_func(cluster_name: str, nodegroup: str, version: str, region: str):
     return ami_type, launch_template_id, version_no, latest_ami
 
 
-def update_current_launch_template_ami(lt_id: str, latest_ami: str, region: str) -> None:
-    """Update the current launch template's AMI."""
+def update_current_launch_template_ami(lt_id: str, latest_ami: str, region: str) -> int:
+    """Create a new launch template version with the new AMI; return its version number.
+
+    SourceVersion="$Latest" merges the latest existing version, preserving its
+    block device mappings (incl. KMS-encrypted volumes), UserData, etc., and only
+    overrides ImageId.
+    """
     ec2 = boto3.client("ec2", region_name=region)
-    ec2.create_launch_template_version(
+    response = ec2.create_launch_template_version(
         LaunchTemplateId=lt_id,
         SourceVersion="$Latest",
         VersionDescription="Latest-AMI",
         LaunchTemplateData={"ImageId": latest_ami},
     )
-    echo_info(f"New launch template created with AMI {latest_ami}")
+    new_version = response["LaunchTemplateVersion"]["VersionNumber"]
+    echo_info(f"New launch template version {new_version} created with AMI {latest_ami}")
+    return new_version
 
 
 def update_nodegroup(cluster_name: str, nodegroup: str, version: str, region: str) -> bool:

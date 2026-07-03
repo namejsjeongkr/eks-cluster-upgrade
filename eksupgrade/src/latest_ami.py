@@ -25,9 +25,13 @@ def get_latest_ami(cluster_version: str, instance_type: str, image_to_search: st
     # AL2023 must be checked BEFORE AL2 to avoid substring match ("Amazon Linux 2" is in "Amazon Linux 2023")
     if "Amazon Linux 2023" in instance_type:
         if "arm64" in image_to_search.lower() or "arm64" in instance_type.lower():
-            names = [f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2023/arm64/standard/recommended/image_id"]
+            names = [
+                f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2023/arm64/standard/recommended/image_id"
+            ]
         else:
-            names = [f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2023/x86_64/standard/recommended/image_id"]
+            names = [
+                f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2023/x86_64/standard/recommended/image_id"
+            ]
     elif "Amazon Linux 2" in instance_type:
         if "arm64" in image_to_search.lower() or "arm64" in instance_type.lower():
             names = [f"/aws/service/eks/optimized-ami/{cluster_version}/amazon-linux-2-arm64/recommended/image_id"]
